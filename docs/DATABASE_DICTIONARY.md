@@ -3,6 +3,13 @@
 **Engine:** SQLite 3  
 **Last updated:** 2026-07-09
 
+> ⚠️ **Scope note (2026-07-14):** This dictionary describes the original
+> SkillSelect-only SQLite prototype, preserved unchanged. It is a separate
+> database from the production MySQL pipeline. For the current MySQL 8
+> schema (25 tables + `vw_occupation_intelligence`), live row counts, and
+> Tableau connection details, see `docs/final_migration_summary.md` and
+> `ETL/schema_mysql.sql`.
+
 ---
 
 ## Table: `occupation_ceilings`

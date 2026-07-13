@@ -2,6 +2,14 @@
 **For:** Marketing Team & Senior Management  
 **Last updated:** 2026-07-09
 
+> ⚠️ **Scope note (2026-07-14):** This guide describes the original
+> SkillSelect-only SQLite dashboard (`occupation_intelligence` table in
+> `data/aic_occupation_intelligence.db`), preserved unchanged. The
+> production dashboard now runs on **MySQL 8**, with
+> **`vw_occupation_intelligence`** as the primary Tableau entry point —
+> see `docs/final_migration_summary.md` for connection details and current
+> data coverage.
+
 ---
 
 ## What is this dashboard?

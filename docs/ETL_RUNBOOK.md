@@ -3,6 +3,15 @@
 **Last updated:** 2026-07-09  
 **Frequency:** Monthly (1st of each month)
 
+> ⚠️ **Scope note (2026-07-14):** This runbook covers only the SkillSelect
+> capture → SQLite prototype pipeline (`AIC_SkillSelect_ETL.ipynb`,
+> `ETL/occupation_intelligence_etl.py`), preserved unchanged and separate
+> from the production MySQL pipeline. For the current 7-source MySQL
+> pipeline (RBA, Home Affairs, CRICOS, JSA, ABS, Skilled Migration,
+> Education) — its run commands, validators, and Tableau connection — see
+> `docs/final_migration_summary.md`, `ETL/run_all.py`, and
+> `ETL/deploy_and_validate.py`.
+
 ---
 
 ## Overview

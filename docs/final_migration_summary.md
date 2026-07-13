@@ -207,3 +207,31 @@ messages on `mysql-live-deployment`.
 - [x] Tableau can connect and read every table/view via `aic_user`
 - [x] SQLite prototype preserved untouched (`ETL/schema_sqlite.sql`, `ETL/lib_etl.py`)
 - [x] `.env` is in `.gitignore`, never committed
+
+## Final Repository Audit (2026-07-14)
+
+A repository-wide consistency pass after live deployment:
+
+- Removed `deploy_mysql.sh`: superseded and genuinely broken — it called
+  `run_all.py --mysql` (a flag that no longer exists now that `run_all.py`
+  is MySQL-only) and `run_all_mysql()` (never existed), and granted
+  `ALL PRIVILEGES` rather than the approved least-privilege set. The
+  correct, tested equivalent is `ETL/deploy_and_validate.py`.
+- Fixed stale hardcoded quality-gate numbers in
+  `ETL/deploy_and_validate.py`'s report generator (90/90 → 96/96 schema
+  checks, 50/50 → 65/65 unit tests, 17/17 → 50/50 wiring checks) to match
+  the actual current validators.
+- Added scope-clarifying banners to docs that describe the preserved
+  SQLite/SkillSelect prototype or pre-migration planning, so they can't be
+  mistaken for describing the current MySQL production system:
+  `docs/DATABASE_DICTIONARY.md`, `docs/ETL_RUNBOOK.md`,
+  `docs/DASHBOARD_USER_GUIDE.md`, `docs/mysql_test_plan.md`,
+  `docs/mysql_schema_reconciliation.md`, `docs/schema_review.md`,
+  `docs/proposed_mysql_model.md`. None of their content was rewritten.
+- Confirmed `ETL/schema.sql` (still referenced by every original SQLite
+  ETL script as its live `SCHEMA` constant) and `ETL/schema_sqlite.sql`
+  (the frozen Phase 0 backup copy) are intentionally distinct, not a stale
+  duplicate.
+- Re-ran all quality gates after every change: 65/65 unit tests, 96/96
+  schema checks, 50/50 wiring checks — all still pass. Verified every core
+  ETL module still imports cleanly.

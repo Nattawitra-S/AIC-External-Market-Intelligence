@@ -2,6 +2,18 @@
 **AIC Market Intelligence Database**  
 **July 2026 — Pre-production validation**
 
+> ⚠️ **Superseded (2026-07-14):** This was the pre-production test plan,
+> written before live deployment. Live testing surfaced real bugs that
+> invalidate some assumptions here — notably the `GRANT ALL PRIVILEGES`
+> shown below (the deployed grant is least-privilege, no `DROP`/`FILE`/
+> `TRIGGER`/`SUPER`/`ALL PRIVILEGES`), the "23 tables" expectation (25 in
+> the final schema), and the `SA`/`Trend`/`Original` measure convention
+> assumed for `fact_job_vacancy` (the real source values are `Seasonally
+> Adjusted`/`Seasonally Adjusted Index`/`Trend`/`Trend Index`). For
+> authoritative live-verified row counts, measures, and results, see
+> `docs/final_migration_summary.md`. Kept here as historical planning
+> record.
+
 ---
 
 ## Prerequisites

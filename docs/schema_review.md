@@ -2,6 +2,10 @@
 **AIC Market Intelligence Project**  
 **Reviewed July 2026 — Prior to MySQL migration**
 
+> ⚠️ **Historical planning document (2026-07-14):** Pre-migration review,
+> kept for design rationale. The MySQL migration is complete and live —
+> see `docs/final_migration_summary.md` for current state.
+
 ---
 
 ## Overview

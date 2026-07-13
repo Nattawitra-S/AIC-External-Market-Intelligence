@@ -2,6 +2,11 @@
 **AIC Market Intelligence Database**  
 **Version 1.0 — July 2026**
 
+> ⚠️ **Historical planning document (2026-07-14):** Pre-migration design
+> proposal, kept for design rationale. The MySQL migration is complete and
+> live — see `docs/final_migration_summary.md` for the as-built schema and
+> current state.
+
 ---
 
 ## Design Principles

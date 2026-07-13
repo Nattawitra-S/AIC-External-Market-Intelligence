@@ -3,6 +3,12 @@
 **Date:** 2026-07-13  
 **Status:** Reconciliation complete — used to finalize schema_mysql.sql and ETL wiring
 
+> ⚠️ **Historical planning document (2026-07-14):** Written during Phase 1,
+> before MySQL wiring existed — per-source "MySQL wiring | ❌ NOT YET" rows
+> below reflect that point in time only. All 7 sources are now fully wired,
+> live, and validated; see `docs/final_migration_summary.md` for current
+> status and live row counts.
+
 ---
 
 ## 1. Source-to-MySQL Table Map
