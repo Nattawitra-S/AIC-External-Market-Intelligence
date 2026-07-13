@@ -505,9 +505,9 @@ def run_mysql_abs(conn, dry_run: bool = False, source: str = "api",
                   start_period: Optional[str] = None) -> int:
     """
     ABS ETL for MySQL.
-    Only processes: lf, cpi, nom, erp_cob (4 of 7 ABS flows)
-    EXCLUDED: lf_industry, lf_occupation (not in MySQL schema)
-              edu_output (decision #4)
+    Only processes 4 of the 7 raw ABS flows: lf, cpi, nom, erp_cob.
+    The remaining flows have no corresponding table in the approved
+    MySQL schema and are intentionally not loaded here.
 
     Column renames:
       lf:      period → lf_period,  state → state_code
