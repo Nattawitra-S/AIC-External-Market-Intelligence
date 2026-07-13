@@ -263,7 +263,7 @@ CREATE TABLE IF NOT EXISTS fact_student_visa_activity (
     id              INT UNSIGNED NOT NULL AUTO_INCREMENT,
     applicant_type  VARCHAR(40)  NOT NULL,
     sector          VARCHAR(60)  NOT NULL,
-    financial_year  VARCHAR(7)   NOT NULL COMMENT 'YYYY-YY e.g. 2023-24',
+    financial_year  VARCHAR(30)   NOT NULL COMMENT 'YYYY-YY e.g. 2023-24',
     measure         VARCHAR(20)  NOT NULL COMMENT 'lodged | granted | grant_rate_pct',
     value           DECIMAL(12,2),
     _etl_source     VARCHAR(150),
@@ -282,7 +282,7 @@ CREATE TABLE IF NOT EXISTS fact_temp_skilled_visa (
     visa_subclass   VARCHAR(10)  NOT NULL,
     nationality     VARCHAR(200) NOT NULL,
     country_id      SMALLINT UNSIGNED,
-    financial_year  VARCHAR(10)  NOT NULL,
+    financial_year  VARCHAR(30)  NOT NULL,
     state_code      VARCHAR(3)   NOT NULL DEFAULT 'AUS',
     measure         VARCHAR(15)  NOT NULL COMMENT 'granted | holders',
     value           DECIMAL(12,2),
@@ -303,7 +303,7 @@ CREATE TABLE IF NOT EXISTS fact_temp_graduate_visa (
     stream          VARCHAR(100) NOT NULL,
     nationality     VARCHAR(200) NOT NULL,
     country_id      SMALLINT UNSIGNED,
-    financial_year  VARCHAR(10)  NOT NULL,
+    financial_year  VARCHAR(30)  NOT NULL,
     measure         VARCHAR(15)  NOT NULL COMMENT 'lodged | granted',
     value           DECIMAL(12,2),
     _etl_source     VARCHAR(150),
@@ -342,7 +342,7 @@ CREATE TABLE IF NOT EXISTS fact_permanent_migration (
 -- Generated columns used because visa_subclass, stream, state_code are all nullable
 CREATE TABLE IF NOT EXISTS fact_skilled_migration (
     id              INT UNSIGNED NOT NULL AUTO_INCREMENT,
-    financial_year  VARCHAR(7)   NOT NULL,
+    financial_year  VARCHAR(30)   NOT NULL,
     visa_subclass   VARCHAR(10),
     stream          VARCHAR(100),
     state_code      VARCHAR(3),
@@ -526,7 +526,7 @@ CREATE TABLE IF NOT EXISTS ref_occupation_profile (
 -- Grain: one row per financial_year × country_name_k × anzsco_code_k × visa_subclass_k × measure
 CREATE TABLE IF NOT EXISTS ref_skilled_migration_by_cob_occupation (
     id              INT UNSIGNED NOT NULL AUTO_INCREMENT,
-    financial_year  VARCHAR(7)   NOT NULL,
+    financial_year  VARCHAR(30)   NOT NULL,
     country_name    VARCHAR(200),
     country_id      SMALLINT UNSIGNED,
     anzsco_code     VARCHAR(8),

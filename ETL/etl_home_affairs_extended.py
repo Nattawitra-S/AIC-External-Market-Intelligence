@@ -240,7 +240,11 @@ def parse_bp0014_holders(path: Path) -> pd.DataFrame:
     # Try to find a date/count column
     count_candidates = [c for c in df.columns if re.search(r"\d{4}", str(c)[:4])
                         or "count" in c or "total" in c or "number" in c]
-    if count_candidates:
+    # visa_subclass is a required NOT NULL business key downstream — if the
+    # sheet layout didn't yield it (e.g. a pivot-table export instead of a
+    # flat table), there is no usable data here. Return empty rather than
+    # passing the raw, unparsed sheet through as if it were real rows.
+    if count_candidates and "visa_subclass" in df.columns:
         id_cols = [c for c in ["visa_subclass", "nationality", "state_territory"]
                    if c in df.columns]
         long = _melt_wide(df, id_cols, "holder_count")
@@ -249,7 +253,7 @@ def parse_bp0014_holders(path: Path) -> pd.DataFrame:
             long = long.rename(columns={"financial_year": "as_at_date"})
         return _clean_count(long, "holder_count")
 
-    return df
+    return pd.DataFrame()
 
 
 # ── BP0016 PARSERS ────────────────────────────────────────────────────────────
