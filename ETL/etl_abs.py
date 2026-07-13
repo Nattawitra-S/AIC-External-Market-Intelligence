@@ -195,11 +195,19 @@ def _parse_abs_xlsx_generic(path: Path, table: str) -> pd.DataFrame:
                 # Series ID row: cell 0 is "Series ID" or the row is all-string codes
                 if str(raw.iloc[i, 0]).strip().lower() in ("series id", "series_id"):
                     series_ids = raw.iloc[i].tolist()
-                # Data rows start when first column parses as a date
+                # Data rows start when first column parses as a date.
+                # pd.to_datetime("nan", errors="raise") does NOT raise -- it
+                # silently returns NaT -- so an empty/NaN cell in column A
+                # must be excluded explicitly, or every sheet whose row 0
+                # happens to be blank there mis-detects data_start=0.
+                cell0 = raw.iloc[i, 0]
+                if pd.isna(cell0):
+                    continue
                 try:
-                    val = pd.to_datetime(str(raw.iloc[i, 0]).strip(), errors="raise")
-                    data_start = i
-                    break
+                    val = pd.to_datetime(str(cell0).strip(), errors="raise")
+                    if pd.notna(val):
+                        data_start = i
+                        break
                 except Exception:
                     pass
 
@@ -231,18 +239,31 @@ def _parse_abs_xlsx_generic(path: Path, table: str) -> pd.DataFrame:
             meta_rows = raw.iloc[:data_start]
             title_row = None
             unit_row  = None
+            series_type_row = None
             for idx in range(len(meta_rows)):
                 r = str(meta_rows.iloc[idx, 0]).lower()
                 if "title" in r or "description" in r:
                     title_row = idx
                 if "unit" in r:
                     unit_row  = idx
+                if "series type" in r:
+                    series_type_row = idx
+
+            # Standard ABS layout has no explicit "Title" label in column A --
+            # row 0 holds the series description directly (e.g. "Employed
+            # total ;  Persons ;"), right above the "Unit" row. Fall back to
+            # that position when no labeled title row was found.
+            if title_row is None:
+                title_row = 0
 
             if title_row is not None:
                 title_map = dict(zip(raw.iloc[title_row].tolist()[1:], series_cols))
                 long["title"] = long["series_id"].map({s: t for s, t in zip(series_cols, raw.iloc[title_row].tolist()[1:])})
             if unit_row is not None:
                 long["unit"] = long["series_id"].map({s: u for s, u in zip(series_cols, raw.iloc[unit_row].tolist()[1:])})
+            if series_type_row is not None:
+                long["series_type"] = long["series_id"].map(
+                    {s: t for s, t in zip(series_cols, raw.iloc[series_type_row].tolist()[1:])})
 
             long["_sheet"] = sheet
             frames.append(long)
@@ -259,8 +280,12 @@ def parse_local_lf(path: Path) -> pd.DataFrame:
     df = _parse_abs_xlsx_generic(path, "abs_labour_force")
     if df.empty:
         return df
-    # LF table has adjustment type encoded in title/series
-    df["adjustment_type"] = df.get("title", "").str.extract(r"(Trend|Seasonally adjusted|Original)", expand=False)
+    # LF table has adjustment type in a separate "Series Type" metadata row
+    # (Trend | Seasonally Adjusted | Original), not embedded in the title text.
+    if "series_type" in df.columns:
+        df["adjustment_type"] = df["series_type"]
+    else:
+        df["adjustment_type"] = df.get("title", "").str.extract(r"(Trend|Seasonally adjusted|Original)", expand=False)
     df["sex"] = df.get("title", "").str.extract(r"(Persons|Males|Females)", expand=False)
     df["measure"] = df.get("title", "")
     df["state"] = "AUS"
@@ -278,34 +303,100 @@ def parse_local_cpi(path: Path) -> pd.DataFrame:
     return df
 
 
+_STATE_NAME_TO_CODE = {
+    "new south wales": "NSW", "victoria": "VIC", "queensland": "QLD",
+    "south australia": "SA", "western australia": "WA", "tasmania": "TAS",
+    "northern territory": "NT", "australian capital territory": "ACT",
+}
+
+
+def _find_crosstab_header_row(raw: pd.DataFrame, max_rows: int = 20) -> int | None:
+    """
+    Find the header row of an ABS "SACC code / Country of birth x year"
+    cross-tab sheet (a wide table of countries x years, one sheet per
+    state) -- a different shape from the date-indexed time series that
+    _parse_abs_xlsx_generic() handles.
+    """
+    for i in range(min(max_rows, len(raw))):
+        row_str = " ".join(str(v) for v in raw.iloc[i].dropna().tolist()).lower()
+        if "sacc code" in row_str and "country of birth" in row_str:
+            return i
+    return None
+
+
+def _parse_country_year_crosstab(path: Path, sheet: str, state_code: str) -> pd.DataFrame:
+    """Melt one ABS country-of-birth x year cross-tab sheet to long format."""
+    raw = pd.read_excel(path, sheet_name=sheet, header=None)
+    header_idx = _find_crosstab_header_row(raw)
+    if header_idx is None:
+        return pd.DataFrame()
+
+    df = raw.iloc[header_idx + 1:].copy()
+    df.columns = [norm_col(h) for h in raw.iloc[header_idx].tolist()]
+    df = df.dropna(how="all")
+
+    country_col = next((c for c in df.columns if "country" in c), None)
+    if country_col is None:
+        return pd.DataFrame()
+    df = df.rename(columns={country_col: "country_name"})
+
+    year_cols = [c for c in df.columns if re.match(r"^\d{4}", str(c))]
+    if not year_cols:
+        return pd.DataFrame()
+
+    long = df.melt(id_vars=["country_name"], value_vars=year_cols,
+                    var_name="period", value_name="value")
+    # Column headers went through norm_col() (a column-NAME normaliser),
+    # e.g. "2004-05" -> "2004_05" or numeric 1996.0 -> "1996_0". Recover a
+    # clean "YYYY" or "YYYY-YY" period value.
+    long["period"] = (
+        long["period"].astype(str).str.extract(r"^(\d{4}(?:_\d{2})?)")[0]
+        .str.replace("_", "-", regex=False)
+    )
+    long["value"] = pd.to_numeric(long["value"], errors="coerce")
+    long = long.dropna(subset=["value", "country_name", "period"])
+    long["state_territory"] = state_code
+    return long
+
+
 def parse_local_migration(path: Path) -> pd.DataFrame:
-    """Parse ABS migration XLSX (Net/Arrivals/Departures by COB and state)."""
-    df = _parse_abs_xlsx_generic(path, "abs_net_overseas_migration")
-    if df.empty:
-        return df
-    # Infer direction from filename
-    fname = path.name.lower()
-    if "net" in fname:
-        df["direction"] = "net"
-    elif "arrival" in fname:
-        df["direction"] = "arrivals"
-    elif "departure" in fname:
-        df["direction"] = "departures"
-    else:
-        df["direction"] = "unknown"
-    # Try to parse COB and state from title
-    df["country_of_birth"] = df.get("title", "Unknown")
-    df["state_territory"] = "AUS"
-    return df
+    """
+    Parse ABS NOM XLSX: one country x financial-year cross-tab sheet per
+    state (Table 1.2 = NSW, 1.3 = VIC, ... 1.9 = ACT). Table 1.1 is a
+    notes-only sheet with no data table.
+    """
+    xl = pd.ExcelFile(path)
+    frames = []
+    for sheet in xl.sheet_names:
+        if not sheet.lower().startswith("table 1.") or sheet == "Table 1.1":
+            continue
+        raw_head = pd.read_excel(path, sheet_name=sheet, header=None, nrows=15)
+        title_text = " ".join(str(v) for v in raw_head.iloc[:15, 0].dropna().tolist()).lower()
+        state_code = next(
+            (code for name, code in _STATE_NAME_TO_CODE.items() if name in title_text),
+            "AUS",
+        )
+        df = _parse_country_year_crosstab(path, sheet, state_code)
+        if not df.empty:
+            df["direction"] = "net"
+            frames.append(df)
+
+    if not frames:
+        return pd.DataFrame()
+    return pd.concat(frames, ignore_index=True)
 
 
 def parse_local_erp_cob(path: Path) -> pd.DataFrame:
-    df = _parse_abs_xlsx_generic(path, "abs_erp_country_of_birth")
+    """
+    Parse ABS ERP-by-country-of-birth XLSX. Table 1.1 has individual-country
+    detail (Australia-wide, no state breakdown); Tables 1.2/1.3 are coarser
+    minor/major-group aggregates of the same data and are skipped to avoid
+    double-counting at a different grain.
+    """
+    df = _parse_country_year_crosstab(path, "Table 1.1", state_code="AUS")
     if df.empty:
         return df
-    df["country_of_birth"] = df.get("title", "Unknown")
-    df["state_territory"] = "AUS"
-    return df
+    return df.rename(columns={"value": "population"})
 
 
 def parse_local_edu_output(path: Path) -> pd.DataFrame:
