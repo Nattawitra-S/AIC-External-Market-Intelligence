@@ -623,27 +623,26 @@ SELECT
     os.state_code,
     vac.vacancy_count      AS latest_vacancies,
     vac.vacancy_period     AS vacancy_as_at,
-    prof_earn.value_num    AS median_annual_salary_aud,
+    CAST(prof_earn.value_text AS DECIMAL(14,2)) * 52 AS median_annual_salary_aud,
     prof_emp.value_text    AS employment_size
 FROM fact_occupation_shortage os
 LEFT JOIN fact_job_vacancy vac
     ON  vac.anzsco_code_k = os.anzsco_code
     AND vac.state_code    = os.state_code
-    AND vac.measure       = 'SA'
+    AND vac.measure       = 'Seasonally Adjusted'
     AND vac.vacancy_period = (
         SELECT MAX(v2.vacancy_period) FROM fact_job_vacancy v2
         WHERE v2.anzsco_code_k = os.anzsco_code
           AND v2.state_code    = os.state_code
-          AND v2.measure       = 'SA'
+          AND v2.measure       = 'Seasonally Adjusted'
     )
 LEFT JOIN ref_occupation_profile prof_earn
-    ON  prof_earn.anzsco_code   = os.anzsco_code
-    AND prof_earn.profile_measure LIKE '%Earn%'
-    AND prof_earn.dimension LIKE '%Median%'
+    ON  prof_earn.anzsco_code = os.anzsco_code
+    AND prof_earn.dimension   = 'median_full_time_earnings_per_week'
+    AND prof_earn.value_text REGEXP '^[0-9]+(\\.[0-9]+)?$'
 LEFT JOIN ref_occupation_profile prof_emp
-    ON  prof_emp.anzsco_code   = os.anzsco_code
-    AND prof_emp.profile_measure LIKE '%Employ%'
-    AND prof_emp.dimension LIKE '%Size%';
+    ON  prof_emp.anzsco_code = os.anzsco_code
+    AND prof_emp.dimension   = 'employed';
 
 
 SET foreign_key_checks = 1;

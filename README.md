@@ -1,12 +1,40 @@
-# SkillSelect ETL Pipeline
+# AIC External Market Intelligence Database
 **Australian Centre of English (AIC) — Market Intelligence Project**
 
-Automated pipeline: SkillSelect (Qlik WebSocket) → SQLite → Tableau dashboard.
-Tracks occupation ceilings, visa invitation rates, shortage status, and visa eligibility — updated monthly.
+Pipeline: RBA, Home Affairs, CRICOS, JSA, ABS, Skilled Migration, and
+Department of Education data → **MySQL 8** → Tableau dashboard.
+Tracks occupation shortages, job vacancies, student visa/enrolment activity,
+skilled migration, exchange rates, labour force and CPI data — updated per
+source release cadence.
+
+The original SkillSelect-only SQLite prototype (`AIC_SkillSelect_ETL.ipynb`,
+`ETL/occupation_intelligence_etl.py`, `ETL/schema_sqlite.sql`) is preserved
+unchanged; see `docs/final_migration_summary.md` for the full migration
+report.
 
 ---
 
-## Quick Start
+## Quick Start (MySQL — current pipeline)
+
+```bash
+cd ~/Documents/Gov_ETL_data
+cp .env.example .env   # fill in MYSQL_HOST/PORT/USER/PASS/DB
+pip install -r requirements.txt mysql-connector-python
+
+# Dry run (zero-write, parse-only) — all 7 sources
+python ETL/run_all.py --dry-run --local-only
+
+# Live load — all 7 sources, in the approved order
+python ETL/run_all.py --local-only
+
+# Verify
+python ETL/verify_mysql_database.py
+```
+
+Tableau connects directly to MySQL — see `docs/final_migration_summary.md`
+for connection details, live row counts, and known limitations.
+
+## Quick Start (SkillSelect / SQLite prototype — preserved, unchanged)
 
 ```bash
 cd ~/Documents/Gov_ETL_data
@@ -62,7 +90,18 @@ Gov_ETL_data/
 
 ---
 
-## Database Tables
+## Database Tables (MySQL, current)
+
+25 base tables (dim/fact/ref/bridge/staging/audit) + `vw_occupation_intelligence`
+view. Full schema: `ETL/schema_mysql.sql`. Column-level dictionary:
+`docs/DATABASE_DICTIONARY.md`. Live row counts and per-table status:
+`docs/final_migration_summary.md`.
+
+Connect Tableau to MySQL using the `MYSQL_HOST`/`MYSQL_PORT`/`MYSQL_DB`/
+`MYSQL_USER` values in `.env`. Recommended entry point:
+`vw_occupation_intelligence`.
+
+### SkillSelect / SQLite prototype tables (preserved, separate database)
 
 | Table | Description |
 |-------|-------------|
@@ -71,7 +110,7 @@ Gov_ETL_data/
 | `visa_eligibility` | MLTSSL/STSOL/ROL eligibility from Home Affairs |
 | `occupation_intelligence` | Denormalized fact table for Tableau |
 
-Connect Tableau to: `data/aic_occupation_intelligence.db`
+Connect Tableau to: `data/aic_occupation_intelligence.db` (SQLite, separate from the MySQL pipeline above)
 
 ---
 
@@ -93,4 +132,4 @@ crontab -e
 ---
 
 **Owner:** Mild (Nattawitra Saengcha) @ AIC  
-**Last updated:** 2026-07-09
+**Last updated:** 2026-07-14
