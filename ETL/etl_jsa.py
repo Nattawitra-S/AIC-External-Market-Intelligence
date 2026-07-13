@@ -61,9 +61,19 @@ LOCAL_FILES = {
 
 # ── IVI PARSERS ───────────────────────────────────────────────────────────────
 
-def _detect_header_row(df_raw: pd.DataFrame, hint: str) -> int:
-    """Find the row index where hint text appears."""
+def _detect_header_row(df_raw: pd.DataFrame, hint: str, min_nonnull: int = 3) -> int:
+    """
+    Find the row index where hint text appears.
+
+    A title row (e.g. "2025 Occupational Shortage List (ANZSCO 2022)") can
+    incidentally match the hint too, since it can contain both keywords of
+    an "a|b" pattern in one sentence. Real header rows have multiple
+    populated columns, so require at least `min_nonnull` non-null cells to
+    rule out single-cell title rows.
+    """
     for i, row in df_raw.head(10).iterrows():
+        if row.notna().sum() < min_nonnull:
+            continue
         if row.astype(str).str.contains(hint, case=False, na=False).any():
             return i
     return 0
@@ -173,8 +183,24 @@ def _normalise_ivi(df: pd.DataFrame) -> pd.DataFrame:
             col_map[c] = "state_territory"
     df = df.rename(columns=col_map)
 
+    if "state_territory" in df.columns:
+        # National aggregate is labelled "AUST" (4 chars) in this source,
+        # vs. the 3-char 'AUS' convention used everywhere else in the schema.
+        df["state_territory"] = df["state_territory"].replace({"AUST": "AUS"})
+
+    if "period" in df.columns:
+        # The date column headers get passed through norm_col() (a column
+        # NAME normaliser) before melting, turning e.g. Timestamp
+        # 2006-01-01 into the literal value "2006_01_01_00_00_00" instead
+        # of a clean "YYYY-MM" period. Recover the year/month from it.
+        df["period"] = (
+            df["period"].astype(str).str.extract(r"^(\d{4})_(\d{2})")
+            .apply(lambda r: f"{r[0]}-{r[1]}" if pd.notna(r[0]) else None, axis=1)
+        )
+
     df["value"] = pd.to_numeric(df["value"], errors="coerce")
-    df = df.dropna(subset=["value"])
+    dropna_cols = [c for c in ["value", "period"] if c in df.columns]
+    df = df.dropna(subset=dropna_cols)
 
     keep = [c for c in ["period", "anzsco_code", "occupation_name",
                          "anzsco_level", "state_territory", "measure", "value"]
@@ -204,17 +230,22 @@ def parse_osl_6digit(path: Path) -> pd.DataFrame:
                 continue
 
             col_map = {}
+            assigned = set()
+
+            def _assign(c, target):
+                if target not in assigned:
+                    col_map[c] = target
+                    assigned.add(target)
+
             for c in df.columns:
                 if "anzsco" in c and ("code" in c or c == "anzsco"):
-                    col_map[c] = "anzsco_code"
+                    _assign(c, "anzsco_code")
                 elif "occupation" in c or "title" in c:
-                    col_map[c] = "occupation_name"
-                elif "shortage" in c and "status" in c:
-                    col_map[c] = "shortage_status"
-                elif "shortage" in c and not col_map.get("shortage_status"):
-                    col_map[c] = "shortage_status"
+                    _assign(c, "occupation_name")
+                elif "shortage" in c:
+                    _assign(c, "shortage_status")
                 elif "osca" in c or "category" in c:
-                    col_map[c] = "osca_category"
+                    _assign(c, "osca_category")
                 elif "state" in c or "territory" in c:
                     col_map[c] = "state_territory"
                 elif "year" in c or "assessment" in c:
@@ -227,7 +258,8 @@ def parse_osl_6digit(path: Path) -> pd.DataFrame:
                                      "shortage_status", "osca_category",
                                      "assessment_year", "state_territory"]
                         if c in df.columns]
-                return df[keep].dropna(subset=["shortage_status"])
+                dropna_cols = [c for c in ["shortage_status", "anzsco_code"] if c in keep]
+                return df[keep].dropna(subset=dropna_cols)
         except Exception as e:
             log.warning(f"  Sheet {sheet}: {e}")
 

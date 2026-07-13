@@ -283,6 +283,12 @@ def run_mysql_jsa(conn, dry_run: bool = False) -> int:
                     "shortage_status", "osca_category", "assessment_year", "state_code",
                     "_etl_source", "_etl_loaded_at"]
             osl_all = _keep(osl_all, want)
+            # fact_occupation_shortage is keyed on ANZSCO. The OSCA-2024
+            # sheet uses a different, non-ANZSCO occupation code scheme and
+            # has no anzsco_code — drop those rows rather than violate the
+            # NOT NULL constraint (would need a code crosswalk to include).
+            if "anzsco_code" in osl_all.columns:
+                osl_all = osl_all.dropna(subset=["anzsco_code"])
             n = upsert_df_mysql(osl_all, "fact_occupation_shortage", conn, dry_run=dry_run, audit=audit)
             audit.complete()
             total += n
