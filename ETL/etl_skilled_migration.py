@@ -58,6 +58,13 @@ def _find_header(raw: pd.DataFrame, hints: list[str]) -> int:
     return 0
 
 
+_STATE_NAME_TO_CODE = {
+    "New South Wales": "NSW", "Victoria": "VIC", "Queensland": "QLD",
+    "South Australia": "SA", "Western Australia": "WA", "Tasmania": "TAS",
+    "Northern Territory": "NT", "Australian Capital Territory": "ACT",
+}
+
+
 def _melt_years(df: pd.DataFrame, id_cols: list[str], value_col: str) -> pd.DataFrame:
     year_cols = [c for c in df.columns
                  if re.match(r"^\d{4}", str(c).strip()) and c not in id_cols]
@@ -81,6 +88,16 @@ def parse_summaries(path: Path) -> pd.DataFrame:
     for sheet in xl.sheet_names:
         if any(x in sheet.lower() for x in ["note", "content", "source", "glossary"]):
             continue
+        # Country and industry breakdowns don't fit fact_skilled_migration's
+        # grain (visa_subclass x stream x state_territory x measure) --
+        # country is already correctly covered by
+        # ref_skilled_migration_by_cob_occupation, and industry has no
+        # target table in the approved schema. Without this, a row label
+        # like "United States of America" or "Real Estate Services" can
+        # false-match the "state"/"territory" header hint (since both
+        # contain "state" as a substring) and corrupt state_territory.
+        if any(x in sheet.lower() for x in ["by country", "by industry"]):
+            continue
         try:
             raw = pd.read_excel(path, sheet_name=sheet, header=None)
             header_idx = _find_header(raw, ["Visa", "Subclass", "Stream", "State", "Territory"])
@@ -90,15 +107,19 @@ def parse_summaries(path: Path) -> pd.DataFrame:
 
             id_cols = []
             col_map = {}
+            assigned = set()
             for c in df.columns:
-                if "visa" in c and ("subclass" in c or "type" in c):
+                if "visa" in c and ("subclass" in c or "type" in c) and "visa_subclass" not in assigned:
                     col_map[c] = "visa_subclass"
+                    assigned.add("visa_subclass")
                     id_cols.append("visa_subclass")
-                elif "stream" in c or "program" in c:
+                elif ("stream" in c or "program" in c) and "stream" not in assigned:
                     col_map[c] = "stream"
+                    assigned.add("stream")
                     id_cols.append("stream")
-                elif "state" in c or "territory" in c:
+                elif ("state" in c or "territory" in c) and "state_territory" not in assigned:
                     col_map[c] = "state_territory"
+                    assigned.add("state_territory")
                     id_cols.append("state_territory")
             df = df.rename(columns=col_map)
             id_cols = list(dict.fromkeys(id_cols))  # deduplicate preserving order
@@ -114,6 +135,19 @@ def parse_summaries(path: Path) -> pd.DataFrame:
             long = _melt_years(df, id_cols, "value")
             if "value" not in long.columns:
                 continue
+
+            if "state_territory" in long.columns:
+                # Source uses full state names ("New South Wales"); schema
+                # state_code is a 3-char code matching the dim_state seed
+                # convention. "Not Specified" and unmapped values become
+                # NULL (state_code is nullable in fact_skilled_migration).
+                long["state_territory"] = long["state_territory"].map(_STATE_NAME_TO_CODE)
+
+            if "visa_subclass" in long.columns:
+                # Source uses a descriptive label ("457 Temporary Work
+                # (Skilled)"); schema visa_subclass is the bare numeric code
+                # matching the dim_visa_subclass.subclass_code convention.
+                long["visa_subclass"] = long["visa_subclass"].astype(str).str.extract(r"^(\d+)")[0]
 
             long["value"] = pd.to_numeric(
                 long["value"].astype(str).str.replace(r"[^\d.-]", "", regex=True),
@@ -157,20 +191,25 @@ def parse_country_occupation(path: Path) -> pd.DataFrame:
 
             id_cols = []
             col_map = {}
+            assigned = set()
             for c in df.columns:
-                if "country" in c or "birth" in c or "nationality" in c:
+                if ("country" in c or "birth" in c or "nationality" in c) and "country_of_birth" not in assigned:
                     col_map[c] = "country_of_birth"
+                    assigned.add("country_of_birth")
                     id_cols.append("country_of_birth")
-                elif "anzsco" in c and "code" in c:
+                elif "anzsco" in c and "code" in c and "anzsco_code" not in assigned:
                     col_map[c] = "anzsco_code"
+                    assigned.add("anzsco_code")
                     id_cols.append("anzsco_code")
                 elif "anzsco" in c and "code" not in c:
                     pass  # skip anzsco name cols for now
-                elif "occupation" in c or "title" in c:
+                elif ("occupation" in c or "title" in c) and "occupation_name" not in assigned:
                     col_map[c] = "occupation_name"
+                    assigned.add("occupation_name")
                     id_cols.append("occupation_name")
-                elif "visa" in c and ("subclass" in c or "type" in c):
+                elif "visa" in c and ("subclass" in c or "type" in c) and "visa_subclass" not in assigned:
                     col_map[c] = "visa_subclass"
+                    assigned.add("visa_subclass")
                     id_cols.append("visa_subclass")
             df = df.rename(columns=col_map)
             id_cols = list(dict.fromkeys(id_cols))
@@ -181,6 +220,19 @@ def parse_country_occupation(path: Path) -> pd.DataFrame:
             long = _melt_years(df, id_cols, "value")
             if "value" not in long.columns:
                 continue
+
+            if "state_territory" in long.columns:
+                # Source uses full state names ("New South Wales"); schema
+                # state_code is a 3-char code matching the dim_state seed
+                # convention. "Not Specified" and unmapped values become
+                # NULL (state_code is nullable in fact_skilled_migration).
+                long["state_territory"] = long["state_territory"].map(_STATE_NAME_TO_CODE)
+
+            if "visa_subclass" in long.columns:
+                # Source uses a descriptive label ("457 Temporary Work
+                # (Skilled)"); schema visa_subclass is the bare numeric code
+                # matching the dim_visa_subclass.subclass_code convention.
+                long["visa_subclass"] = long["visa_subclass"].astype(str).str.extract(r"^(\d+)")[0]
 
             long["value"] = pd.to_numeric(
                 long["value"].astype(str).str.replace(r"[^\d.-]", "", regex=True),
