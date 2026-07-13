@@ -351,9 +351,9 @@ CREATE TABLE IF NOT EXISTS fact_skilled_migration (
     _etl_source     VARCHAR(150),
     _etl_loaded_at  DATETIME,
     -- Generated non-null key columns (approved decision #7)
-    visa_subclass_k VARCHAR(10) NOT NULL GENERATED ALWAYS AS (COALESCE(visa_subclass, ''))  STORED,
-    stream_k        VARCHAR(100)NOT NULL GENERATED ALWAYS AS (COALESCE(stream, ''))           STORED,
-    state_k         VARCHAR(3)  NOT NULL GENERATED ALWAYS AS (COALESCE(state_code, ''))       STORED,
+    visa_subclass_k VARCHAR(10) GENERATED ALWAYS AS (COALESCE(visa_subclass, '')) STORED NOT NULL,
+    stream_k        VARCHAR(100) GENERATED ALWAYS AS (COALESCE(stream, '')) STORED NOT NULL,
+    state_k         VARCHAR(3)  GENERATED ALWAYS AS (COALESCE(state_code, '')) STORED NOT NULL,
     PRIMARY KEY (id),
     UNIQUE KEY uk_sm    (financial_year, visa_subclass_k, stream_k(60), state_k, measure(60)),
     KEY idx_sm_fy       (financial_year),
@@ -376,7 +376,7 @@ CREATE TABLE IF NOT EXISTS fact_job_vacancy (
     _etl_source     VARCHAR(150),
     _etl_loaded_at  DATETIME,
     -- Generated non-null key column for nullable anzsco_code
-    anzsco_code_k   VARCHAR(8)  NOT NULL GENERATED ALWAYS AS (COALESCE(anzsco_code, '')) STORED,
+    anzsco_code_k   VARCHAR(8)  GENERATED ALWAYS AS (COALESCE(anzsco_code, '')) STORED NOT NULL,
     PRIMARY KEY (id),
     UNIQUE KEY uk_jv    (vacancy_period, anzsco_code_k, state_code, measure),
     KEY idx_jv_period   (vacancy_period),
@@ -401,7 +401,7 @@ CREATE TABLE IF NOT EXISTS fact_occupation_shortage (
     _etl_source     VARCHAR(150),
     _etl_loaded_at  DATETIME,
     -- Generated key for nullable assessment_year
-    assessment_year_k VARCHAR(4) NOT NULL GENERATED ALWAYS AS (COALESCE(assessment_year, '0')) STORED,
+    assessment_year_k VARCHAR(4) GENERATED ALWAYS AS (COALESCE(assessment_year, '0')) STORED NOT NULL,
     PRIMARY KEY (id),
     UNIQUE KEY uk_osl   (anzsco_code, anzsco_level, state_code, assessment_year_k),
     KEY idx_osl_status  (shortage_status),
@@ -464,7 +464,7 @@ CREATE TABLE IF NOT EXISTS fact_overseas_migration (
     _etl_source     VARCHAR(150),
     _etl_loaded_at  DATETIME,
     -- Generated key for nullable country_name
-    country_name_k  VARCHAR(200) NOT NULL GENERATED ALWAYS AS (COALESCE(country_name, '')) STORED,
+    country_name_k  VARCHAR(200) GENERATED ALWAYS AS (COALESCE(country_name, '')) STORED NOT NULL,
     PRIMARY KEY (id),
     UNIQUE KEY uk_nom   (nom_period, country_name_k(80), state_code, direction),
     KEY idx_nom_period  (nom_period),
@@ -485,7 +485,7 @@ CREATE TABLE IF NOT EXISTS fact_population_by_cob (
     _etl_source     VARCHAR(150),
     _etl_loaded_at  DATETIME,
     -- Generated key for nullable country_name
-    country_name_k  VARCHAR(200) NOT NULL GENERATED ALWAYS AS (COALESCE(country_name, '')) STORED,
+    country_name_k  VARCHAR(200) GENERATED ALWAYS AS (COALESCE(country_name, '')) STORED NOT NULL,
     PRIMARY KEY (id),
     UNIQUE KEY uk_erp   (erp_period, country_name_k(80), state_code),
     KEY idx_erp_period  (erp_period),
@@ -515,7 +515,7 @@ CREATE TABLE IF NOT EXISTS ref_occupation_profile (
     _etl_source     VARCHAR(150),
     _etl_loaded_at  DATETIME,
     -- Generated key for nullable profile_year
-    profile_year_k  VARCHAR(4)   NOT NULL GENERATED ALWAYS AS (COALESCE(profile_year, '0')) STORED,
+    profile_year_k  VARCHAR(4)   GENERATED ALWAYS AS (COALESCE(profile_year, '0')) STORED NOT NULL,
     PRIMARY KEY (id),
     UNIQUE KEY uk_ocp   (anzsco_code, profile_measure(50), dimension(80), profile_year_k),
     KEY idx_ocp_anzsco  (anzsco_code)
@@ -538,9 +538,9 @@ CREATE TABLE IF NOT EXISTS ref_skilled_migration_by_cob_occupation (
     _etl_source     VARCHAR(150),
     _etl_loaded_at  DATETIME,
     -- Generated keys for nullable dimension columns
-    country_name_k  VARCHAR(200) NOT NULL GENERATED ALWAYS AS (COALESCE(country_name, ''))  STORED,
-    anzsco_code_k   VARCHAR(8)   NOT NULL GENERATED ALWAYS AS (COALESCE(anzsco_code, ''))   STORED,
-    visa_subclass_k VARCHAR(10)  NOT NULL GENERATED ALWAYS AS (COALESCE(visa_subclass, '')) STORED,
+    country_name_k  VARCHAR(200) GENERATED ALWAYS AS (COALESCE(country_name, '')) STORED NOT NULL,
+    anzsco_code_k   VARCHAR(8)   GENERATED ALWAYS AS (COALESCE(anzsco_code, '')) STORED NOT NULL,
+    visa_subclass_k VARCHAR(10)  GENERATED ALWAYS AS (COALESCE(visa_subclass, '')) STORED NOT NULL,
     PRIMARY KEY (id),
     UNIQUE KEY uk_smc   (financial_year, country_name_k(80), anzsco_code_k, visa_subclass_k, measure(50)),
     KEY idx_smc_fy      (financial_year),
@@ -588,8 +588,8 @@ CREATE TABLE IF NOT EXISTS stg_skillselect_eoi (
     eoi_count        INT UNSIGNED,
     captured_at      DATETIME        NOT NULL,
     -- Generated keys for nullable dimension values
-    dim1_val_k       VARCHAR(250) NOT NULL GENERATED ALWAYS AS (COALESCE(dimension_1_val, '')) STORED,
-    dim2_val_k       VARCHAR(150) NOT NULL GENERATED ALWAYS AS (COALESCE(dimension_2_val, '')) STORED,
+    dim1_val_k       VARCHAR(250) GENERATED ALWAYS AS (COALESCE(dimension_1_val, '')) STORED NOT NULL,
+    dim2_val_k       VARCHAR(150) GENERATED ALWAYS AS (COALESCE(dimension_2_val, '')) STORED NOT NULL,
     PRIMARY KEY (id),
     UNIQUE KEY uk_eoi   (as_at_month, visa_type, eoi_status, source_view, dim1_val_k(100), dim2_val_k(60)),
     KEY idx_eoi_month   (as_at_month),

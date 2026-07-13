@@ -88,11 +88,6 @@ def run_checks():
 
     # ── Check 1: All 25 tables exist ──────────────────────────────────────────
     print("Check 1: All 25 required tables exist")
-    existing = set(r[0] for r in conn.cursor().execute(
-        f"SELECT TABLE_NAME FROM information_schema.TABLES "
-        f"WHERE TABLE_SCHEMA='{db}' AND TABLE_TYPE='BASE TABLE'"
-    ) or [])
-    # Use proper cursor
     cur = conn.cursor()
     cur.execute(
         f"SELECT TABLE_NAME FROM information_schema.TABLES "
