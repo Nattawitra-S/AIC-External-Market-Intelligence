@@ -19,6 +19,7 @@ USAGE:
 """
 
 import argparse
+import hashlib
 from pathlib import Path
 
 import pandas as pd
@@ -61,6 +62,17 @@ def _norm(df: pd.DataFrame) -> pd.DataFrame:
     return df
 
 
+def _synth_location_id(provider_id, location_name) -> str:
+    """
+    Neither the CSV nor XLSX CRICOS exports include a natural location
+    identifier. Derive a stable one from (provider_id, location_name) so
+    dim_provider_location and bridge_course_location agree on the same
+    id for the same physical location.
+    """
+    key = f"{str(provider_id).strip().upper()}|{str(location_name).strip().lower()}"
+    return hashlib.md5(key.encode("utf-8")).hexdigest()[:16]
+
+
 def transform_institutions(df: pd.DataFrame) -> pd.DataFrame:
     df = _norm(df)
     # Standardise column names across CSV and XLSX variants
@@ -80,6 +92,16 @@ def transform_institutions(df: pd.DataFrame) -> pd.DataFrame:
         "registered_to": "registration_end_date",
     }
     df = df.rename(columns={k: v for k, v in rename.items() if k in df.columns})
+    # XLSX export fallbacks: "Trading Name" is often blank, so prefer the
+    # always-populated "Institution Name" when no provider_name was set yet.
+    fallbacks = {
+        "provider_name": "institution_name",
+        "provider_type": "institution_type",
+        "state":         "postal_address_state",
+    }
+    for target, src in fallbacks.items():
+        if target not in df.columns and src in df.columns:
+            df = df.rename(columns={src: target})
     want = ["provider_id", "provider_name", "provider_type", "state",
             "website", "status", "registration_end_date"]
     return df[[c for c in want if c in df.columns]]
@@ -131,10 +153,15 @@ def transform_locations(df: pd.DataFrame) -> pd.DataFrame:
         "address_line1": "address",
         "suburb_or_town": "suburb",
         "suburb": "suburb",
+        "city": "suburb",
         "state_or_territory": "state",
         "postcode": "postcode",
     }
     df = df.rename(columns={k: v for k, v in rename.items() if k in df.columns})
+    if "location_id" not in df.columns and {"provider_id", "location_name"} <= set(df.columns):
+        df["location_id"] = [
+            _synth_location_id(p, n) for p, n in zip(df["provider_id"], df["location_name"])
+        ]
     want = ["location_id", "provider_id", "location_name", "address",
             "suburb", "state", "postcode"]
     return df[[c for c in want if c in df.columns]]
@@ -150,11 +177,30 @@ def transform_course_locations(df: pd.DataFrame) -> pd.DataFrame:
         "cricos_provider_code": "provider_id",
     }
     df = df.rename(columns={k: v for k, v in rename.items() if k in df.columns})
+    if "location_id" not in df.columns and {"provider_id", "location_name"} <= set(df.columns):
+        df["location_id"] = [
+            _synth_location_id(p, n) for p, n in zip(df["provider_id"], df["location_name"])
+        ]
     want = ["cricos_code", "location_id", "provider_id"]
     return df[[c for c in want if c in df.columns]]
 
 
 # ── XLSX multi-sheet loader ───────────────────────────────────────────────────
+
+def _find_xlsx_header_row(xlsx_path: Path, sheet: str, max_rows: int = 10) -> int:
+    """
+    Find the real header row in a CRICOS export sheet.
+
+    Each sheet starts with a title row and a "Report generated ..." row
+    before the actual column headers (e.g. "CRICOS Provider Code", ...).
+    """
+    raw = pd.read_excel(xlsx_path, sheet_name=sheet, header=None, nrows=max_rows)
+    for i, row in raw.iterrows():
+        row_str = " ".join(str(v) for v in row.dropna().tolist()).lower()
+        if "cricos provider code" in row_str:
+            return i
+    return 0
+
 
 def load_from_xlsx(xlsx_path: Path) -> dict[str, pd.DataFrame]:
     """Load CRICOS all-in-one XLSX (4 sheets)."""
@@ -163,14 +209,15 @@ def load_from_xlsx(xlsx_path: Path) -> dict[str, pd.DataFrame]:
     sheets = {}
     for sheet in xl.sheet_names:
         s = sheet.lower().strip()
+        header_row = _find_xlsx_header_row(xlsx_path, sheet)
         if "institution" in s or "provider" in s:
-            sheets["institutions"] = pd.read_excel(xlsx_path, sheet_name=sheet)
+            sheets["institutions"] = pd.read_excel(xlsx_path, sheet_name=sheet, header=header_row)
         elif "course location" in s or "course-location" in s:
-            sheets["course_locations"] = pd.read_excel(xlsx_path, sheet_name=sheet)
+            sheets["course_locations"] = pd.read_excel(xlsx_path, sheet_name=sheet, header=header_row)
         elif "course" in s:
-            sheets["courses"] = pd.read_excel(xlsx_path, sheet_name=sheet)
+            sheets["courses"] = pd.read_excel(xlsx_path, sheet_name=sheet, header=header_row)
         elif "location" in s:
-            sheets["locations"] = pd.read_excel(xlsx_path, sheet_name=sheet)
+            sheets["locations"] = pd.read_excel(xlsx_path, sheet_name=sheet, header=header_row)
     return sheets
 
 
