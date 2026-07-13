@@ -111,17 +111,24 @@ def get_mysql_conn(schema_file: Optional[Path] = None):
 def _apply_schema(conn, schema_file: Path):
     """Execute each statement in a SQL file."""
     sql = schema_file.read_text(encoding="utf-8")
+    # Strip full-line comments before splitting on ';' — a naive
+    # "does the whole chunk start with --" check silently drops any
+    # real statement that happens to follow a comment header line.
+    code_lines = [ln for ln in sql.splitlines() if not ln.strip().startswith("--")]
+    cleaned = "\n".join(code_lines)
     cursor = conn.cursor()
-    # Split on semicolons, skip empty statements and comment-only blocks
-    for stmt in sql.split(";"):
+    for stmt in cleaned.split(";"):
         stmt = stmt.strip()
-        if stmt and not stmt.startswith("--"):
-            try:
-                cursor.execute(stmt)
-            except mysql.connector.Error as e:
-                # Warn on minor errors (e.g., IF NOT EXISTS — already exists)
-                if e.errno not in (1050, 1060, 1061, 1062):  # table/column/index/dup exists
-                    log.warning(f"Schema statement skipped: {e}")
+        if not stmt:
+            continue
+        try:
+            cursor.execute(stmt)
+        except mysql.connector.Error as e:
+            # Benign/expected: object already exists, or view recreation
+            # denied because the least-privilege app user has no DROP
+            # (the view is created once by an admin during initial deploy).
+            if e.errno not in (1050, 1060, 1061, 1062, 1065, 1142):
+                log.warning(f"Schema statement skipped: {e}")
     conn.commit()
     cursor.close()
     log.info(f"Schema applied: {schema_file.name}")
