@@ -707,9 +707,15 @@ def run_mysql_education(conn, dry_run: bool = False, force: bool = False,
         return 0
 
     df = pd.concat(all_frames, ignore_index=True)
-    log.info(f"  [Edu] Total before dedup: {len(df):,} rows")
-    df = df.drop_duplicates()
-    log.info(f"  [Edu] After dedup: {len(df):,} rows")
+    log.info(f"  [Edu] Total parsed: {len(df):,} rows")
+    # Do not drop_duplicates() here: the schema's UNIQUE KEY on
+    # fact_student_enrolment already defines the correct grain (year,
+    # month, nationality, state, sector, provider_type, new_to_australia,
+    # ends_this_year), and load_education_enrolments()'s upsert handles any
+    # genuine key collisions at the DB layer, consistent with every other
+    # source in this pipeline. A blanket full-row drop_duplicates() here
+    # previously discarded ~75% of legitimate rows (3,542,826 -> 877,359),
+    # contradicting the verified dry-run baseline.
 
     # MySQL column renames
     df = _rename(df, {
@@ -808,3 +814,36 @@ def run_mysql_skilled_migration(conn, dry_run: bool = False,
         log.info("  [SM] Skipping 1.4M raw CSV (skip_raw=True in MySQL mode)")
 
     return total
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# 8.  dim_country — auto-derived from reference/country_aliases.csv
+# ─────────────────────────────────────────────────────────────────────────────
+
+def run_mysql_dim_country(conn, dry_run: bool = False) -> int:
+    """
+    Populate dim_country from reference/country_aliases.csv (approved
+    decision #6: dim_country must be auto-derived from this file, not
+    hand-maintained).
+    """
+    from ETL.lib_etl_mysql import upsert_df_mysql, AuditRun
+
+    path = BASE_DIR / "reference" / "country_aliases.csv"
+    if not path.exists():
+        log.warning(f"  [dim_country] Missing: {path}")
+        return 0
+
+    audit = AuditRun(conn, "reference", "dim_country")
+    try:
+        df = pd.read_csv(path, encoding="utf-8-sig")
+        want = ["canonical_name", "iso_alpha2", "iso_alpha3", "name_education",
+                "name_home_affairs", "name_abs", "name_skilled_mig"]
+        df = _keep(df, want)
+        n = upsert_df_mysql(df, "dim_country", conn, dry_run=dry_run, audit=audit)
+        audit.complete()
+        log.info(f"  [dim_country] {n:,} rows → dim_country")
+        return n
+    except Exception as e:
+        audit.fail(str(e))
+        log.error(f"  [dim_country] load failed: {e}")
+        return 0

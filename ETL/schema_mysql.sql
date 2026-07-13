@@ -235,16 +235,24 @@ CREATE TABLE IF NOT EXISTS fact_student_enrolment (
     total               INT UNSIGNED,
     _etl_source         VARCHAR(150),
     _etl_loaded_at      DATETIME,
+    -- Generated non-null key columns for nullable UNIQUE key parts
+    -- (approved decision #7) -- without these, MySQL treats NULL != NULL
+    -- and silently allows duplicate business-key rows through the index.
+    state_code_k        VARCHAR(3)  GENERATED ALWAYS AS (COALESCE(state_code, '')) STORED NOT NULL,
+    sector_k            VARCHAR(60) GENERATED ALWAYS AS (COALESCE(sector, '')) STORED NOT NULL,
+    provider_type_k     VARCHAR(60) GENERATED ALWAYS AS (COALESCE(provider_type, '')) STORED NOT NULL,
+    new_to_australia_k  VARCHAR(5)  GENERATED ALWAYS AS (COALESCE(new_to_australia, '')) STORED NOT NULL,
+    ends_this_year_k     VARCHAR(5) GENERATED ALWAYS AS (COALESCE(ends_this_year, '')) STORED NOT NULL,
     PRIMARY KEY (id),
     UNIQUE KEY uk_enrol (
         enrol_year,
         enrol_month,
         nationality(100),
-        state_code,
-        sector(40),
-        provider_type(40),
-        new_to_australia,
-        ends_this_year
+        state_code_k,
+        sector_k(40),
+        provider_type_k(40),
+        new_to_australia_k,
+        ends_this_year_k
     ),
     KEY idx_enrol_ym          (enrol_year, enrol_month),
     KEY idx_enrol_nationality (nationality(60)),

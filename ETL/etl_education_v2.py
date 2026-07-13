@@ -35,6 +35,16 @@ from ETL.lib_etl import (
 
 log = get_logger("ETL_EDUCATION")
 
+_MONTH_NAME_TO_NUM = {
+    "jan": 1, "feb": 2, "mar": 3, "apr": 4, "may": 5, "jun": 6,
+    "jul": 7, "aug": 8, "sep": 9, "oct": 10, "nov": 11, "dec": 12,
+}
+
+
+def _month_name_to_num(v):
+    return _MONTH_NAME_TO_NUM.get(str(v).strip().lower())
+
+
 BASE_DIR = Path(__file__).parent.parent
 RAW_DIR  = BASE_DIR / "raw_data" / "department_of_education"
 DB_PATH  = BASE_DIR / "data" / "aic_occupation_intelligence.db"
@@ -149,12 +159,19 @@ def parse_pivot_basic(path: Path) -> pd.DataFrame:
 
             df = df.rename(columns=rename)
 
+            if "month" in df.columns:
+                # Month is an abbreviated name ("Jul", "Jan"), not a number.
+                # pd.to_numeric(..., errors="coerce") would silently turn
+                # every value into NaN (which MySQL then forces to 0 on
+                # insert into a NOT NULL column) -- map name -> number first.
+                df["month"] = df["month"].map(_month_name_to_num)
+
             # Convert numeric columns
             for col in ["year", "month", "data_ytd_enrolments", "data_ytd_commencements", "total"]:
                 if col in df.columns:
                     df[col] = pd.to_numeric(df[col], errors="coerce")
 
-            df = df.dropna(subset=["year"])
+            df = df.dropna(subset=[c for c in ["year", "month"] if c in df.columns])
             if df.empty:
                 continue
 
