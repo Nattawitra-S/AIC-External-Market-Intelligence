@@ -1,0 +1,24 @@
+# SkillSelect ETL Pipeline - Dependencies
+# Install: pip install -r requirements.txt
+
+# Browser automation (Phase 1 - capture)
+playwright==1.44.0
+
+# Data processing
+pandas==2.2.2
+numpy==1.26.4
+
+# Database
+sqlalchemy==2.0.30
+
+# HTTP / WebSocket
+websockets==12.0
+requests==2.32.3
+aiohttp==3.9.5
+
+# Logging & scheduling
+schedule==1.2.2
+python-dotenv==1.0.1
+
+# Optional: Excel export for OSL data
+openpyxl==3.1.4

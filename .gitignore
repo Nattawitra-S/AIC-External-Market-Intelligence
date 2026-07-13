@@ -1,0 +1,45 @@
+# Credentials — NEVER commit
+.env
+
+# Generated staging CSV files for MySQL bulk load
+/tmp/aic_etl_staging/
+/tmp/aic_bulk_*.csv
+
+# SQLite database (binary, large)
+data/*.db
+data/*.db-shm
+data/*.db-wal
+
+# Raw downloaded files (large, re-downloadable)
+raw_data/
+
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+venv/
+dist/
+build/
+
+# IDE
+.DS_Store
+.idea/
+.vscode/
+*.swp
+
+# Browser automation profile (contains cookies/session data)
+browser_data/
+
+# Network capture scratch files
+captures/
+*.har
+
+# Anaconda project metadata
+anaconda_projects/
+
+# Jupyter checkpoints
+.ipynb_checkpoints/
+
+# Local Claude settings
+.claude/
