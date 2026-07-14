@@ -1,0 +1,15 @@
+# AIC Market Intelligence Streamlit dashboard -- dependencies
+# Install: pip install -r streamlit_app/requirements.txt
+
+streamlit==1.51.0
+plotly==6.3.0
+pandas==2.3.3
+SQLAlchemy==2.0.43
+mysql-connector-python>=9.0.0
+python-dotenv==1.0.1
+
+# Testing
+pytest>=8.0.0
+
+# Screenshot generation only (not required to run the app itself)
+# playwright>=1.44.0

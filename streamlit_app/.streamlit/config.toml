@@ -1,0 +1,15 @@
+[theme]
+# AIC-style professional palette -- kept in sync with modules/theme.py
+primaryColor = "#0B3D59"
+backgroundColor = "#F7F9FA"
+secondaryBackgroundColor = "#FFFFFF"
+textColor = "#1A1A1A"
+font = "sans serif"
+
+[server]
+headless = true
+enableCORS = false
+enableXsrfProtection = true
+
+[browser]
+gatherUsageStats = false
