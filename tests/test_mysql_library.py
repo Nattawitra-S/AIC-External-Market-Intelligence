@@ -451,9 +451,16 @@ class TestBulkLoadCsv(unittest.TestCase):
 class TestLoadEducationEnrolments(unittest.TestCase):
 
     def _make_edu_df(self, n_rows: int) -> pd.DataFrame:
+        # Each row must have a distinct (enrol_year, enrol_month, ...)
+        # business key -- load_education_enrolments() now validates
+        # uniqueness in Python and rejects duplicates (see
+        # EDU_ENROLMENT_KEY_COLUMNS), so fixtures can no longer repeat the
+        # same key across rows the way earlier tests did before that
+        # validation existed. Varying (year, month) per row is enough since
+        # every other key column is held constant.
         return pd.DataFrame({
-            "enrol_year":        [2024] * n_rows,
-            "enrol_month":       [6]    * n_rows,
+            "enrol_year":        [2020 + (i // 12) for i in range(n_rows)],
+            "enrol_month":       [1 + (i % 12) for i in range(n_rows)],
             "nationality":       ["India"] * n_rows,
             "state_code":        ["NSW"] * n_rows,
             "sector":            ["Higher Education"] * n_rows,
@@ -476,7 +483,16 @@ class TestLoadEducationEnrolments(unittest.TestCase):
         self.assertEqual(n, 250)
 
     def test_chunks_correctly(self):
-        """250 rows with chunk_rows=100 → 3 bulk_load_csv calls."""
+        """250 rows with chunk_rows=100 → 3 bulk_load_csv calls.
+
+        load_education_enrolments(dry_run=True) now short-circuits before
+        any chunking at all (true zero-write, zero DB interaction) -- so to
+        exercise the chunking loop itself, the outer call must use
+        dry_run=False (driving the real DELETE+load transaction against the
+        mocked connection), while each individual chunk write is forced
+        into bulk_load_csv's own dry_run=True path so no real LOAD DATA is
+        attempted against the mock.
+        """
         conn, cursor = _mock_conn()
         cursor.lastrowid = 1
         cursor.rowcount = 100
@@ -492,7 +508,7 @@ class TestLoadEducationEnrolments(unittest.TestCase):
         df = self._make_edu_df(250)
         with patch.object(lib, "bulk_load_csv", side_effect=_count_calls):
             lib.load_education_enrolments(
-                df, conn, staging_dir=Path("/tmp"), dry_run=True, chunk_rows=100
+                df, conn, staging_dir=Path("/tmp"), dry_run=False, chunk_rows=100
             )
         self.assertEqual(len(call_count), 3)
 
@@ -536,6 +552,107 @@ class TestLoadEducationEnrolments(unittest.TestCase):
         audit_mock.fail.assert_called_once()
         fail_msg = audit_mock.fail.call_args[0][0]
         self.assertIn("disk full", fail_msg)
+
+    # ── Duplicate-row rejection ─────────────────────────────────────────────
+    # NOTE: AuditRun is mocked in these tests so that its own independent
+    # bookkeeping commits/cursor calls to etl_audit_log (see
+    # TestLoadEducationEnrolments.test_audit_run_created_for_education) don't
+    # get conflated with the education *data* transaction's own DELETE/
+    # commit/rollback calls, which is what's actually under test here.
+
+    def test_duplicate_business_key_rows_rejected(self):
+        """Two rows sharing the full business key must raise, not silently load."""
+        conn, cursor = _mock_conn()
+        df = self._make_edu_df(3)
+        # Force rows 0 and 1 onto the same business key (distinct 'total').
+        df.loc[1, ["enrol_year", "enrol_month"]] = df.loc[0, ["enrol_year", "enrol_month"]].values
+
+        with patch.object(lib, "AuditRun", return_value=MagicMock()):
+            with self.assertRaises(ValueError) as ctx:
+                lib.load_education_enrolments(df, conn, staging_dir=Path("/tmp"), dry_run=False)
+        self.assertIn("duplicate business key", str(ctx.exception))
+
+    def test_duplicate_rejection_never_touches_the_data_table(self):
+        """Duplicate-key rejection must happen before any DELETE/load
+        statement against the data table (only audit bookkeeping, which is
+        mocked away here, may run)."""
+        conn, cursor = _mock_conn()
+        df = self._make_edu_df(2)
+        df.loc[1] = df.loc[0]  # fully identical row -> duplicate key
+
+        with patch.object(lib, "AuditRun", return_value=MagicMock()):
+            with self.assertRaises(ValueError):
+                lib.load_education_enrolments(df, conn, staging_dir=Path("/tmp"), dry_run=False)
+        conn.cursor.assert_not_called()
+        conn.commit.assert_not_called()
+
+    # ── Rerunning the same dataset ──────────────────────────────────────────
+
+    def test_rerun_same_dataset_succeeds_twice(self):
+        """Loading the identical dataset twice must succeed both times (full
+        replace each time), not error out or accumulate duplicates."""
+        conn, cursor = _mock_conn()
+        cursor.rowcount = 5
+        df = self._make_edu_df(5)
+
+        with patch.object(lib, "AuditRun", return_value=MagicMock()), \
+             patch.object(lib, "bulk_load_csv", side_effect=lambda **kw: len(kw["df"])):
+            n1 = lib.load_education_enrolments(df, conn, staging_dir=Path("/tmp"), dry_run=False)
+            n2 = lib.load_education_enrolments(df, conn, staging_dir=Path("/tmp"), dry_run=False)
+
+        self.assertEqual(n1, 5)
+        self.assertEqual(n2, 5)
+        # Each run must clear the table before reloading -- this is what
+        # guarantees a rerun can never leave duplicate rows behind.
+        delete_calls = [c for c in cursor.execute.call_args_list if "DELETE FROM" in str(c)]
+        self.assertEqual(len(delete_calls), 2)
+        self.assertEqual(conn.commit.call_count, 2)  # one atomic commit per successful run
+
+    # ── Failure mid-load: rollback + preservation ───────────────────────────
+
+    def test_mid_load_failure_rolls_back_and_never_commits(self):
+        """If a later chunk fails, the whole transaction must roll back and
+        commit() must never be reached -- so the previous data (which the
+        DELETE only uncommitted-removed) is preserved when MySQL rolls the
+        transaction back."""
+        conn, cursor = _mock_conn()
+        df = self._make_edu_df(3)
+
+        calls = []
+
+        def _flaky_bulk_load(**kw):
+            calls.append(kw["df"])
+            if len(calls) == 2:
+                raise RuntimeError("connection reset mid-chunk")
+            return len(kw["df"])
+
+        with patch.object(lib, "AuditRun", return_value=MagicMock()), \
+             patch.object(lib, "bulk_load_csv", side_effect=_flaky_bulk_load):
+            with self.assertRaises(RuntimeError):
+                lib.load_education_enrolments(
+                    df, conn, staging_dir=Path("/tmp"), dry_run=False, chunk_rows=1
+                )
+
+        self.assertEqual(len(calls), 2)  # stopped after the failing 2nd chunk, 3rd never attempted
+        conn.rollback.assert_called_once()
+        conn.commit.assert_not_called()
+
+    def test_row_count_mismatch_treated_as_fatal(self):
+        """If MySQL ever silently discards rows (its documented LOAD DATA
+        LOCAL INFILE duplicate-key behaviour), that must raise, not be
+        treated as a successful partial load."""
+        conn, cursor = _mock_conn()
+        df = self._make_edu_df(4)
+
+        with patch.object(lib, "AuditRun", return_value=MagicMock()), \
+             patch.object(lib, "bulk_load_csv", return_value=1):  # always reports fewer than requested
+            with self.assertRaises(RuntimeError) as ctx:
+                lib.load_education_enrolments(
+                    df, conn, staging_dir=Path("/tmp"), dry_run=False, chunk_rows=4
+                )
+        self.assertIn("Refusing a silent partial load", str(ctx.exception))
+        conn.rollback.assert_called_once()
+        conn.commit.assert_not_called()
 
 
 # ─────────────────────────────────────────────────────────────────────────────

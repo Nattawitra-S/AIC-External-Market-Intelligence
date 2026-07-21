@@ -297,6 +297,7 @@ def bulk_load_csv(
     dry_run: bool = False,
     audit: Optional[AuditRun] = None,
     null_sentinel: str = "\\N",
+    commit: bool = True,
 ) -> int:
     """
     Efficiently load a large DataFrame into MySQL using LOAD DATA LOCAL INFILE.
@@ -312,6 +313,11 @@ def bulk_load_csv(
         dry_run:      If True, write CSV but do not execute LOAD DATA
         audit:        Optional AuditRun for tracking
         null_sentinel: String used for NULL values in CSV (default: \\N = MySQL NULL)
+        commit:       If False, do not commit after this LOAD DATA -- the
+                       caller is managing a multi-statement transaction
+                       (e.g. loading several chunks that must all become
+                       visible atomically together). Default True preserves
+                       this function's original single-call behaviour.
 
     Returns:
         Number of rows loaded
@@ -362,7 +368,8 @@ def bulk_load_csv(
     cursor = conn.cursor()
     try:
         cursor.execute(sql)
-        conn.commit()
+        if commit:
+            conn.commit()
         n = cursor.rowcount
         log.info(f"  ↳ Loaded {n:,} rows → `{table}`")
         if audit:
@@ -415,19 +422,86 @@ def norm_col(c: str) -> str:
 
 # ── Education Bulk Load (3.5M rows) ──────────────────────────────────────────
 
+# The correct business/uniqueness key for fact_student_enrolment, mirroring
+# the schema's UNIQUE KEY uk_enrol (schema_mysql.sql) exactly. A row is a
+# duplicate if and only if all of these match. This is enforced in Python
+# BEFORE any database write: MySQL's LOAD DATA LOCAL INFILE cannot be relied
+# on to reject duplicates -- when LOCAL is used and neither IGNORE nor
+# REPLACE is specified, the server silently discards conflicting rows
+# instead of raising an error (documented MySQL behaviour, and reproduced in
+# production: a full rerun on already-loaded data inserted 0 rows with no
+# error). Relying on that would mean revised YTD figures for an
+# already-loaded (year, month, ...) combination are silently dropped.
+EDU_ENROLMENT_KEY_COLUMNS = [
+    "enrol_year", "enrol_month", "nationality", "state_code",
+    "sector", "provider_type", "new_to_australia", "ends_this_year",
+]
+
+
 def load_education_enrolments(
     df: pd.DataFrame,
     conn,
     staging_dir: Optional[Path] = None,
     dry_run: bool = False,
     chunk_rows: int = BULK_CHUNK_ROWS,
+    table: str = "fact_student_enrolment",
 ) -> int:
     """
-    Efficiently load education_enrolments (3.5M rows) using chunked LOAD DATA.
+    Atomically replace `table` with a freshly validated load of `df`, using
+    only a plain SQL transaction -- no DDL (CREATE/DROP/RENAME TABLE).
 
-    Splits the DataFrame into chunks, stages each as a CSV, and issues
-    LOAD DATA LOCAL INFILE per chunk. This avoids holding the full 3.5M rows
-    in a single transaction.
+    Pivot_Basic_All_web.xlsx is a full YTD-cumulative snapshot on every
+    release (not an incremental delta), so a "load" is really "the current
+    complete dataset" -- the correct operation is a full, all-or-nothing
+    replacement, not a row-by-row append/upsert into the live table.
+
+    IMPORTANT: an earlier version of this function used a "blue-green"
+    staging-table + `RENAME TABLE` swap. That was reverted after a real
+    (disposable-table) integration test against this project's actual
+    MySQL app user failed with `DROP command denied` -- the app user's
+    grant is `SELECT, INSERT, UPDATE, DELETE, CREATE, REFERENCES, INDEX,
+    ALTER` and deliberately excludes DROP (least-privilege; see
+    `SHOW GRANTS FOR CURRENT_USER`). `RENAME TABLE` also requires DROP-level
+    privilege on the table being renamed away, so that approach cannot work
+    here. This version only ever needs DELETE + INSERT on the *existing*
+    table, both of which are granted.
+
+    Strategy (single explicit transaction, autocommit is already False on
+    this connection -- see `_mysql_config()`):
+
+      1. Validate the incoming DataFrame has no duplicate business-key rows
+         (EDU_ENROLMENT_KEY_COLUMNS) -- fail loudly instead of silently
+         dropping rows. This happens BEFORE any database statement at all.
+      2. `DELETE FROM {table}` -- not yet committed. Other sessions under
+         MySQL's default REPEATABLE READ isolation continue to see the
+         pre-delete data until this transaction commits, so no reader ever
+         observes a missing/partial dataset.
+      3. Bulk-load every chunk into the SAME table with
+         `bulk_load_csv(..., commit=False)`, so nothing is written
+         durably yet. Each chunk's rowcount is checked against its
+         expected length -- if MySQL's LOAD DATA LOCAL INFILE ever
+         silently discards a row (its documented behaviour on a duplicate
+         key when neither IGNORE nor REPLACE is given), that mismatch is
+         treated as fatal rather than a quiet partial success. This should
+         never actually trigger given step 1's pre-validation and the
+         table having just been emptied in this same transaction.
+      4. Only if every chunk's row count matches exactly: issue ONE
+         `conn.commit()` for the whole transaction (the DELETE and every
+         chunk's LOAD DATA become visible together, atomically).
+
+    On any failure at any point after the DELETE: `conn.rollback()` undoes
+    the DELETE and every chunk loaded so far in this transaction, in one
+    step -- `table` ends up in exactly the state it was in before this
+    call, with no partial data ever committed. A retry starts a fresh
+    transaction against the (fully restored) table, so it naturally
+    produces a complete dataset with no duplicate rows.
+
+    Trade-off vs. the reverted staging-swap design: there is no separate
+    physical backup table left behind after a successful load (once
+    committed, the previous dataset is gone -- rollback only helps for
+    failures *during* this call, not after a successful one). Operators
+    who want to inspect the previous dataset after a successful reload
+    should take an external backup (e.g. `mysqldump`) beforehand.
 
     Args:
         df:          Full education enrolments DataFrame
@@ -435,19 +509,48 @@ def load_education_enrolments(
         staging_dir: Temp CSV directory (default: /tmp)
         dry_run:     Parse only, don't write
         chunk_rows:  Rows per CSV chunk (default: 100,000)
+        table:       Target table name (default: fact_student_enrolment;
+                     overridable for isolated testing against a disposable
+                     table that is never the real production table)
 
     Returns:
         Total rows loaded
     """
-    table = "fact_student_enrolment"
     staging_dir = staging_dir or Path("/tmp")
     audit = AuditRun(conn, "education", table)
-    total = 0
-    n_chunks = (len(df) + chunk_rows - 1) // chunk_rows
 
-    log.info(f"  Loading {len(df):,} rows → `{table}` in {n_chunks} chunks of {chunk_rows:,}")
+    if df.empty:
+        log.warning(f"  ↳ load_education_enrolments: empty DataFrame for `{table}`")
+        audit.complete()
+        return 0
 
+    # ── 1. Enforce the uniqueness key in Python, before any DB statement ──────
+    key_cols = [c for c in EDU_ENROLMENT_KEY_COLUMNS if c in df.columns]
+    key_frame = df[key_cols].fillna("")
+    dup_mask = key_frame.duplicated(keep=False)
+    if dup_mask.any():
+        n_dupes = int(dup_mask.sum())
+        sample = df.loc[dup_mask, key_cols].head(5).to_dict("records")
+        msg = (
+            f"Refusing to load `{table}`: {n_dupes:,} rows share a duplicate "
+            f"business key ({', '.join(key_cols)}). Sample: {sample}"
+        )
+        audit.fail(msg)
+        raise ValueError(msg)
+
+    if dry_run or conn is None:
+        log.info(f"  [dry-run] Would atomically replace `{table}` with {len(df):,} validated rows")
+        audit.rows_read = len(df)
+        audit.complete()
+        return len(df)
+
+    cursor = conn.cursor()
     try:
+        cursor.execute(f"DELETE FROM `{table}`")
+        log.info(f"  Cleared `{table}` (uncommitted) — {len(df):,} rows queued for atomic reload")
+
+        total = 0
+        n_chunks = (len(df) + chunk_rows - 1) // chunk_rows
         for i in range(0, len(df), chunk_rows):
             chunk_num = i // chunk_rows + 1
             chunk = df.iloc[i: i + chunk_rows].copy()
@@ -458,19 +561,42 @@ def load_education_enrolments(
                 table=table,
                 conn=conn,
                 staging_dir=staging_dir,
-                dry_run=dry_run,
+                dry_run=False,
                 audit=audit,
+                commit=False,
             )
+            if n != len(chunk):
+                # MySQL silently discarded some rows (LOAD DATA LOCAL
+                # INFILE's implicit duplicate-skip behaviour, or some other
+                # rejection) -- never allow a silent partial load; abort the
+                # whole transaction instead.
+                raise RuntimeError(
+                    f"Chunk {chunk_num}: expected {len(chunk):,} rows loaded, "
+                    f"MySQL reported {n:,}. Refusing a silent partial load."
+                )
             total += n
 
+        if total != len(df):
+            raise RuntimeError(
+                f"Load incomplete for `{table}`: expected {len(df):,} rows, "
+                f"loaded {total:,}."
+            )
+
+        conn.commit()
+        log.info(f"  ✅ Education enrolments: atomically replaced `{table}` with {total:,} rows")
+
+        audit.rows_read = len(df)
+        audit.rows_inserted = total
         audit.complete()
-        log.info(f"  ✅ Education enrolments: {total:,} rows loaded")
+        return total
 
     except Exception as e:
+        conn.rollback()
         audit.fail(str(e))
+        log.error(f"  ❌ Education atomic load failed and was rolled back — `{table}` unchanged: {e}")
         raise
-
-    return total
+    finally:
+        cursor.close()
 
 
 # ── Convenience: run DDL ───────────────────────────────────────────────────────

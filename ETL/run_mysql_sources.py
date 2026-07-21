@@ -731,11 +731,13 @@ def run_mysql_education(conn, dry_run: bool = False, force: bool = False,
     # Do not drop_duplicates() here: the schema's UNIQUE KEY on
     # fact_student_enrolment already defines the correct grain (year,
     # month, nationality, state, sector, provider_type, new_to_australia,
-    # ends_this_year), and load_education_enrolments()'s upsert handles any
-    # genuine key collisions at the DB layer, consistent with every other
-    # source in this pipeline. A blanket full-row drop_duplicates() here
-    # previously discarded ~75% of legitimate rows (3,542,826 -> 877,359),
-    # contradicting the verified dry-run baseline.
+    # ends_this_year) — see EDU_ENROLMENT_KEY_COLUMNS in lib_etl_mysql.py.
+    # load_education_enrolments() validates this key in Python and raises
+    # loudly on any collision rather than silently dropping rows (it does
+    # NOT upsert — it atomically replaces the whole table with the fresh,
+    # validated dataset; see its docstring). A blanket full-row
+    # drop_duplicates() here previously discarded ~75% of legitimate rows
+    # (3,542,826 -> 877,359), contradicting the verified dry-run baseline.
 
     # MySQL column renames
     df = _rename(df, {
