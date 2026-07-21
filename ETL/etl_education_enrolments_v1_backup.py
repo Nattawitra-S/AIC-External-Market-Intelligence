@@ -1,3 +1,5 @@
+# LEGACY — not imported or called by production. Kept for reference only.
+# Production Education MySQL path is ETL.run_mysql_sources.run_mysql_education().
 import pandas as pd
 import sqlite3
 from pathlib import Path
@@ -6,7 +8,9 @@ from pathlib import Path
 # CONFIG
 # ============================================================
 
-RAW_FILE = "/Users/nattawitrasaengcha/Documents/Placement/File_extractor 2/output/Pivot_Basic_All_web (YTD Feb 2026)_extracted_raw_split.xlsx"
+BASE_DIR = Path(__file__).parent.parent
+
+RAW_FILE = str(BASE_DIR / "raw_data" / "File_extractor 2" / "output" / "Pivot_Basic_All_web_extracted_raw_split.xlsx")
 
 DB_FILE = "/Users/nattawitrasaengcha/Documents/Gov_ETL_data /student_visa.db"
 

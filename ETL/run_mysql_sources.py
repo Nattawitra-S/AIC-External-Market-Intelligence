@@ -672,18 +672,38 @@ def run_mysql_education(conn, dry_run: bool = False, force: bool = False,
     for src in MYSQL_EDU_SOURCES:
         path = None
 
-        # Try download
-        if not local_only and src.get("url"):
-            try:
-                path = download_file(src["url"], RAW_DIR, src["filename"], force=force)
-            except Exception as e:
-                log.warning(f"  [Edu] Download failed for {src['desc']}: {e}")
-
-        # Try local fallback (pivot_basic uses pre-extracted file)
-        if path is None or not path.exists():
-            if src["parser"] == etl_edu.parse_pivot_basic:
+        if src["parser"] == etl_edu.parse_pivot_basic:
+            # Pivot_Basic_All_web.xlsx from education.gov.au is a true Excel
+            # pivot cache (merged cells) — it must go through the
+            # File_extractor 2 pipeline before parse_pivot_basic can read it.
+            # Failures here must stop the run rather than silently falling
+            # back to a stale extracted file.
+            if local_only:
                 path = etl_edu._find_extracted_pivot_basic()
-            elif src["parser"] == etl_edu.parse_pivot_detailed:
+                if path is None:
+                    raise RuntimeError(
+                        "  [Edu] --local-only: no valid raw-split file at "
+                        f"{etl_edu.PIVOT_BASIC_RAW_SPLIT}"
+                    )
+            elif dry_run:
+                # True zero-write dry-run: no download, no extractor.
+                path = etl_edu._find_extracted_pivot_basic()
+                if path is None:
+                    log.warning(
+                        "  [Edu] --dry-run: no local raw-split file yet "
+                        f"({etl_edu.PIVOT_BASIC_RAW_SPLIT.name}) — skipping Basic Pivot"
+                    )
+            else:
+                path = etl_edu.download_and_extract_pivot_basic(force=force)
+
+        elif src["parser"] == etl_edu.parse_pivot_detailed:
+            if not local_only and not dry_run and src.get("url"):
+                try:
+                    path = download_file(src["url"], RAW_DIR, src["filename"], force=force)
+                except Exception as e:
+                    log.warning(f"  [Edu] Download failed for {src['desc']}: {e}")
+
+            if path is None or not path.exists():
                 path = etl_edu.LOCAL_FILES.get("parse_pivot_detailed")
 
         if path is None or not path.exists():

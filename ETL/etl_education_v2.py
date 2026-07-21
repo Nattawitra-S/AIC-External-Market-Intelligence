@@ -25,6 +25,8 @@ USAGE:
 
 import argparse
 import re
+import subprocess
+import sys
 from pathlib import Path
 
 import pandas as pd
@@ -87,17 +89,88 @@ SOURCES = [
 
 # ── Fallback local files ───────────────────────────────────────────────────────
 # Pivot_Basic_All_web.xlsx from the website is a true Excel pivot (merged cells, no tabular data).
-# The pre-extracted flat file lives under "Zz Extracted files/" and is used by etl_education_enrolments.py.
-EXTRACTED_DIR = BASE_DIR / "raw_data" / "Zz Extracted files"
+# It must be run through the File_extractor 2 pipeline to produce a flat/tabular
+# file before parse_pivot_basic() can read it.
+#
+# The extractor's data directories (input/output) live under raw_data/,
+# which is gitignored, but the extractor SOURCE CODE is tracked at
+# ETL/tools/extract_fixed.py — it is not colocated with its data anymore.
+FILE_EXTRACTOR_DIR   = BASE_DIR / "raw_data" / "File_extractor 2"
+EXTRACTOR_SCRIPT      = BASE_DIR / "ETL" / "tools" / "extract_fixed.py"
+EXTRACTOR_INPUT_DIR   = FILE_EXTRACTOR_DIR / "input"
+EXTRACTOR_OUTPUT_DIR  = FILE_EXTRACTOR_DIR / "output"
+PIVOT_BASIC_INPUT     = EXTRACTOR_INPUT_DIR / "Pivot_Basic_All_web.xlsx"
+# This is the ONLY valid Education Basic output. Its sibling summary workbook
+# (Pivot_Basic_All_web_extracted.xlsx, no "_raw_split" suffix) does not
+# contain every raw row and must never be selected here.
+PIVOT_BASIC_RAW_SPLIT = EXTRACTOR_OUTPUT_DIR / "Pivot_Basic_All_web_extracted_raw_split.xlsx"
+
 
 def _find_extracted_pivot_basic() -> Path | None:
-    """Locate the pre-extracted flat version of Pivot_Basic_All_web."""
-    candidates = sorted(EXTRACTED_DIR.glob("Pivot_Basic_All_web*extracted*.xlsx"))
-    if candidates:
-        return candidates[-1]   # most recent / alphabetically last
-    # Also check raw_data root
-    candidates = sorted(BASE_DIR.glob("raw_data/**/Pivot_Basic_All_web*extracted*.xlsx"))
-    return candidates[-1] if candidates else None
+    """
+    Return the canonical raw-split output Path if it exists and is non-empty,
+    else None. Deterministic — no glob, no "most recent/alphabetically last"
+    guessing between multiple candidate files.
+    """
+    if PIVOT_BASIC_RAW_SPLIT.exists() and PIVOT_BASIC_RAW_SPLIT.stat().st_size > 0:
+        return PIVOT_BASIC_RAW_SPLIT
+    return None
+
+
+def _run_extractor() -> Path:
+    """
+    Invoke extract_fixed.py as a subprocess against the canonical input file
+    and verify it freshly produced the raw-split output. Raises on any
+    failure — callers must treat this as fatal, not fall back to a stale file.
+    """
+    before_mtime = PIVOT_BASIC_RAW_SPLIT.stat().st_mtime if PIVOT_BASIC_RAW_SPLIT.exists() else None
+
+    # No cwd needed: ETL/tools/extract_fixed.py resolves its own input/output
+    # directories from its tracked location, not from the working directory.
+    subprocess.run(
+        [sys.executable, str(EXTRACTOR_SCRIPT), PIVOT_BASIC_INPUT.name],
+        check=True,
+    )
+
+    if not PIVOT_BASIC_RAW_SPLIT.exists() or PIVOT_BASIC_RAW_SPLIT.stat().st_size == 0:
+        raise RuntimeError(
+            f"Extractor did not produce a valid raw-split output: {PIVOT_BASIC_RAW_SPLIT}"
+        )
+    after_mtime = PIVOT_BASIC_RAW_SPLIT.stat().st_mtime
+    if before_mtime is not None and after_mtime <= before_mtime:
+        raise RuntimeError(
+            f"Extractor ran but raw-split output was not updated (stale file): {PIVOT_BASIC_RAW_SPLIT}"
+        )
+    return PIVOT_BASIC_RAW_SPLIT
+
+
+def download_and_extract_pivot_basic(force: bool = False) -> Path:
+    """
+    Download the latest Pivot_Basic_All_web workbook (unless it already
+    exists locally and force=False), save it atomically as the canonical
+    input, run it through File_extractor 2, and return the verified
+    raw-split output Path. Raises on any failure; callers must stop the
+    pipeline rather than silently falling back to stale data.
+    """
+    url = SOURCES[0]["url"]
+    part_name = PIVOT_BASIC_INPUT.name + ".part"
+
+    if force or not PIVOT_BASIC_INPUT.exists():
+        part_path = EXTRACTOR_INPUT_DIR / part_name
+        try:
+            part_path = download_file(url, EXTRACTOR_INPUT_DIR, part_name, force=True)
+            if part_path.stat().st_size == 0:
+                raise RuntimeError(f"Downloaded file is empty: {url}")
+            part_path.replace(PIVOT_BASIC_INPUT)  # atomic rename, same filesystem
+        except Exception:
+            part_path.unlink(missing_ok=True)
+            raise
+        log.info(f"  [Edu] Downloaded → {PIVOT_BASIC_INPUT}")
+    else:
+        log.info(f"  [Edu] Canonical input already present, skipping download: {PIVOT_BASIC_INPUT.name}")
+
+    return _run_extractor()
+
 
 LOCAL_FILES = {
     "parse_pivot_basic":    _find_extracted_pivot_basic(),   # pre-extracted flat file
@@ -119,9 +192,9 @@ def parse_pivot_basic(path: Path) -> pd.DataFrame:
     Parse the pre-extracted flat version of Pivot_Basic_All_web.xlsx.
 
     The downloaded Pivot_Basic_All_web.xlsx from education.gov.au is a true
-    Excel pivot table with merged cells — it is NOT tabular.  The local
-    fallback is the pre-extracted file:
-        raw_data/Zz Extracted files/Pivot_Basic_All_web*extracted*.xlsx
+    Excel pivot table with merged cells — it is NOT tabular.  The expected
+    input is the File_extractor 2 raw-split output:
+        raw_data/File_extractor 2/output/Pivot_Basic_All_web_extracted_raw_split.xlsx
     which is already flat / tabular and may span multiple sheets.
 
     Expected columns (post-normalise):
