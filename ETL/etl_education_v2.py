@@ -146,28 +146,36 @@ def _run_extractor() -> Path:
 
 def download_and_extract_pivot_basic(force: bool = False) -> Path:
     """
-    Download the latest Pivot_Basic_All_web workbook (unless it already
-    exists locally and force=False), save it atomically as the canonical
-    input, run it through File_extractor 2, and return the verified
-    raw-split output Path. Raises on any failure; callers must stop the
-    pipeline rather than silently falling back to stale data.
+    Always attempt to download the latest Pivot_Basic_All_web workbook —
+    normal production Education mode must never silently reuse whatever
+    canonical input happens to already be on disk. Downloads into a
+    temporary .part file first, validates it, and atomically replaces the
+    canonical input only after the download succeeds.
+
+    On download failure: the .part file is removed, the existing canonical
+    input (if any) is left untouched, and the exception propagates so the
+    caller stops the pipeline rather than extracting a stale canonical
+    input or falling back to a stale raw-split output.
+
+    `force` is accepted for call-site compatibility (it forces the
+    temporary .part download to overwrite any leftover .part from a prior
+    failed attempt) but no longer gates *whether* a download happens —
+    that always happens now, so the caller never has to remember --force
+    for a normal run.
     """
     url = SOURCES[0]["url"]
     part_name = PIVOT_BASIC_INPUT.name + ".part"
+    part_path = EXTRACTOR_INPUT_DIR / part_name
 
-    if force or not PIVOT_BASIC_INPUT.exists():
-        part_path = EXTRACTOR_INPUT_DIR / part_name
-        try:
-            part_path = download_file(url, EXTRACTOR_INPUT_DIR, part_name, force=True)
-            if part_path.stat().st_size == 0:
-                raise RuntimeError(f"Downloaded file is empty: {url}")
-            part_path.replace(PIVOT_BASIC_INPUT)  # atomic rename, same filesystem
-        except Exception:
-            part_path.unlink(missing_ok=True)
-            raise
-        log.info(f"  [Edu] Downloaded → {PIVOT_BASIC_INPUT}")
-    else:
-        log.info(f"  [Edu] Canonical input already present, skipping download: {PIVOT_BASIC_INPUT.name}")
+    try:
+        part_path = download_file(url, EXTRACTOR_INPUT_DIR, part_name, force=True)
+        if not part_path.exists() or part_path.stat().st_size == 0:
+            raise RuntimeError(f"Downloaded file is missing or empty: {url}")
+        part_path.replace(PIVOT_BASIC_INPUT)  # atomic rename, same filesystem
+    except Exception:
+        part_path.unlink(missing_ok=True)
+        raise
+    log.info(f"  [Edu] Downloaded → {PIVOT_BASIC_INPUT}")
 
     return _run_extractor()
 
