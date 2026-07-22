@@ -56,7 +56,7 @@ SCHEMA   = Path(__file__).parent / "schema.sql"
 # These are the permanent data download links from education.gov.au
 SOURCES = [
     {
-        "url":      "https://www.education.gov.au/sites/default/files/documents/Pivot_Basic_All_web.xlsx",
+        "url":      "https://www.education.gov.au/download/20217/international-student-data-year-date-ytd/45085/may-2026-all-data/xlsx",
         "filename": "Pivot_Basic_All_web_latest.xlsx",
         "desc":     "Basic Pivot — YTD enrolments/commencements",
         "table":    "education_enrolments",
