@@ -234,7 +234,7 @@ All three share the same status: schema is complete and correct (grain, keys, co
 
 - **Tableau suitability:** 🚫 **Not usable today — empty.** Do not wire into a dashboard until populated; if built now, any chart against these tables will render blank with no error, which is worse than a missing connection.
 
-### `fact_student_enrolment` — 3,542,826 rows
+### `fact_student_enrolment` — 3,583,979 rows
 | Column | Type |
 |---|---|
 | `id` PK, `enrol_year` SMALLINT, `enrol_month` TINYINT (1-12), `nationality` VARCHAR(200), `country_id` (logical FK, ~35% populated), `state_code`, `sector`, `provider_type`, `new_to_australia` (`Yes`/`No`), `ends_this_year` (`Yes`/`No`), `ytd_enrolments`, `ytd_commencements`, `total` |
@@ -419,7 +419,7 @@ five focused dashboards, each backed by one of the data sources above:
 
 | Table/View | Rows | Table/View | Rows |
 |---|---:|---|---:|
-| `fact_student_enrolment` | 3,542,826 | `dim_course` | 26,448 |
+| `fact_student_enrolment` | 3,583,979 | `dim_course` | 26,448 |
 | `fact_job_vacancy` | 511,560 | `dim_provider_location` | 3,887 |
 | `bridge_course_location` | 46,848 | `ref_skilled_migration_by_cob_occupation` | 4,662 |
 | `ref_occupation_profile` | 50,674 | `dim_country` | 25 |
