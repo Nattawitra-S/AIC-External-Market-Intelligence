@@ -28,7 +28,7 @@ SCHEMA_FILE = Path(__file__).parent / "schema_mysql.sql"
 
 # ─── Expected configuration ───────────────────────────────────────────────────
 
-EXPECTED_TABLE_COUNT = 25
+EXPECTED_TABLE_COUNT = 26
 
 REQUIRED_TABLES = [
     "etl_audit_log",
@@ -41,6 +41,7 @@ REQUIRED_TABLES = [
     "dim_provider_location",
     "fact_exchange_rate",
     "fact_student_enrolment",
+    "fact_student_enrolment_detailed",
     "fact_student_visa_activity",
     "fact_temp_skilled_visa",
     "fact_temp_graduate_visa",
@@ -148,6 +149,34 @@ def find_table_block(sql: str, table_name: str) -> str:
     pattern = rf"CREATE\s+TABLE\s+(?:IF\s+NOT\s+EXISTS\s+)?`?{re.escape(table_name)}`?\s*\(.*?\)\s*[^;]*;"
     m = re.search(pattern, sql, flags=re.IGNORECASE | re.DOTALL)
     return m.group(0) if m else ""
+
+
+def extract_key_columns(block: str, key_name: str) -> set[str] | None:
+    """
+    Return the set of column names (prefix lengths like `nationality(100)`
+    stripped) inside `UNIQUE KEY <key_name> ( ... )`, or None if not found.
+
+    Uses balanced-paren scanning rather than a single non-greedy regex --
+    the column list itself contains parens (prefix lengths), so a naive
+    r"\\((.*?)\\)" stops at the FIRST inner ')' and silently truncates the
+    column list.
+    """
+    m = re.search(rf"UNIQUE\s+KEY\s+{re.escape(key_name)}\s*\(", block, re.IGNORECASE)
+    if not m:
+        return None
+    start = m.end()  # position right after the opening '('
+    depth = 1
+    i = start
+    while i < len(block) and depth > 0:
+        if block[i] == "(":
+            depth += 1
+        elif block[i] == ")":
+            depth -= 1
+        i += 1
+    if depth != 0:
+        return None  # unbalanced -- malformed SQL
+    inner = block[start:i - 1]
+    return {c.strip().split("(")[0].strip() for c in inner.split(",") if c.strip()}
 
 
 # ─── Check functions ─────────────────────────────────────────────────────────
@@ -325,6 +354,49 @@ def run_checks():
             fail("ytd_enrolments column missing in fact_student_enrolment")
     else:
         fail("fact_student_enrolment MISSING")
+    print()
+
+    # ── Check 12b: Detailed education table is a SEPARATE fact table ─────────
+    # Basic and Detailed are different grains (Detailed adds field-of-education
+    # + level-of-study dimensions). They must never share a table or a unique
+    # key -- doing so either collides (94.7% of Detailed rows share Basic's
+    # 8-column key) or, if forced to "work", double-counts enrolments in any
+    # aggregation that doesn't know to keep the two apart.
+    print("Check 12b: fact_student_enrolment_detailed is a separate, wider-grain table")
+    if "fact_student_enrolment_detailed" in tables:
+        ok("fact_student_enrolment_detailed present ✓")
+        det_block = find_table_block(clean_sql, "fact_student_enrolment_detailed")
+        for col in ["broad_field_of_education", "narrow_field_of_education",
+                    "detailed_field_of_education", "level_of_study",
+                    "monthly_enrolments", "monthly_commencements"]:
+            if col in det_block:
+                ok(f"{col} column present ✓")
+            else:
+                fail(f"{col} column missing in fact_student_enrolment_detailed")
+        if re.search(r"\btotal\b", det_block, re.IGNORECASE):
+            fail("fact_student_enrolment_detailed should NOT have a 'total' column "
+                 "(proven exact duplicate of ytd_enrolments in the source data)")
+        else:
+            ok("no redundant 'total' column ✓")
+        # The two tables must not accidentally end up with the same UNIQUE KEY
+        # column set -- that would silently re-permit the Basic/Detailed grain
+        # collision this table split exists to prevent.
+        basic_key_cols = extract_key_columns(edu_block, "uk_enrol")
+        detailed_key_cols = extract_key_columns(det_block, "uk_enrol_detailed")
+        if basic_key_cols is not None and detailed_key_cols is not None:
+            if basic_key_cols == detailed_key_cols:
+                fail("uk_enrol and uk_enrol_detailed have identical column sets — "
+                     "Detailed's wider grain is not actually enforced")
+            elif len(detailed_key_cols) <= len(basic_key_cols):
+                fail(f"uk_enrol_detailed ({len(detailed_key_cols)} cols) is not wider than "
+                     f"uk_enrol ({len(basic_key_cols)} cols) — expected more dimensions, not fewer/equal")
+            else:
+                ok(f"uk_enrol_detailed has a distinct, wider key ({len(detailed_key_cols)} cols "
+                   f"vs uk_enrol's {len(basic_key_cols)}) ✓")
+        else:
+            fail("could not locate uk_enrol / uk_enrol_detailed UNIQUE KEY definitions")
+    else:
+        fail("fact_student_enrolment_detailed MISSING")
     print()
 
     # ── Check 13: AUTO_INCREMENT used (not AUTOINCREMENT) ────────────────────

@@ -264,6 +264,83 @@ CREATE TABLE IF NOT EXISTS fact_student_enrolment (
   COMMENT='YTD cumulative enrolments — use latest month per year for point-in-time analysis';
 
 
+-- Education International Student Enrolments — DETAILED grain (~1.48M rows)
+-- Grain: one row per year x month x region x nationality x state x provider_type
+--        x sector x broad/narrow/detailed field of education x level of study
+--        x foundation x new_to_aus x ends_this_year
+-- NOT the same grain as fact_student_enrolment (Basic): Detailed subdivides
+-- every Basic-grain combination further by field of education and level of
+-- study. Empirically verified against the full Detailed dataset: 94.7% of
+-- rows collide on Basic's 8-column key, so Basic and Detailed must be
+-- separate fact tables, never unioned or summed together in the same
+-- aggregation (e.g. Tableau) -- doing so double/multi-counts enrolments.
+-- Basic supports overall market trends; Detailed supports field-of-education
+-- and level-of-study analysis. Shared dimensions (nationality, state,
+-- sector, provider_type, ...) may relate to both tables, but their measures
+-- must never be added together across tables.
+-- YTD cumulative values per approved decision #1 (same convention as Basic)
+-- Load via LOAD DATA LOCAL INFILE — never executemany
+CREATE TABLE IF NOT EXISTS fact_student_enrolment_detailed (
+    id                            BIGINT UNSIGNED   NOT NULL AUTO_INCREMENT,
+    enrol_year                    SMALLINT UNSIGNED NOT NULL,
+    enrol_month                   TINYINT UNSIGNED  NOT NULL,
+    region                        VARCHAR(100)      NOT NULL,
+    nationality                   VARCHAR(200)      NOT NULL,
+    country_id                    SMALLINT UNSIGNED COMMENT 'FK dim_country (populated post-load)',
+    state_code                    VARCHAR(3)        NOT NULL,
+    provider_type                 VARCHAR(60)       NOT NULL,
+    sector                        VARCHAR(60)       NOT NULL,
+    broad_field_of_education      VARCHAR(150)      NOT NULL,
+    narrow_field_of_education     VARCHAR(150)      NOT NULL,
+    detailed_field_of_education   VARCHAR(150)      NOT NULL,
+    level_of_study                VARCHAR(100)      NOT NULL,
+    foundation                    VARCHAR(5)        NOT NULL COMMENT 'Yes | No',
+    new_to_australia              VARCHAR(5)        NOT NULL COMMENT 'Yes | No',
+    ends_this_year                VARCHAR(5)        NOT NULL COMMENT 'Yes | No',
+    -- Measures. 'total' is deliberately NOT included: verified against the
+    -- full 1,480,597-row dataset, the source 'Total' column is an exact
+    -- duplicate of DATA_YTD_Enrolments (100.00% match) -- ytd_enrolments
+    -- below already carries that value, so a redundant column was omitted.
+    ytd_enrolments                INT UNSIGNED,
+    ytd_commencements             INT UNSIGNED,
+    as_at_1st_month                INT UNSIGNED COMMENT 'DATA_As_at_1st_Month',
+    monthly_enrolments            INT UNSIGNED COMMENT 'DATA_Enrolments_for_Month',
+    monthly_commencements         INT UNSIGNED COMMENT 'DATA_Commencements_for_Month',
+    _etl_source                   VARCHAR(150),
+    _etl_loaded_at                DATETIME,
+    PRIMARY KEY (id),
+    -- All 14 key columns are declared NOT NULL above because the full
+    -- dataset was verified to have zero null/blank values in every one of
+    -- them -- unlike fact_student_enrolment, no COALESCE-to-empty-string
+    -- generated shadow columns are needed; MySQL's NULL != NULL uniqueness
+    -- gap simply does not apply when the columns can never be NULL.
+    UNIQUE KEY uk_enrol_detailed (
+        enrol_year,
+        enrol_month,
+        region(50),
+        nationality(100),
+        state_code,
+        provider_type(40),
+        sector(40),
+        broad_field_of_education(60),
+        narrow_field_of_education(60),
+        detailed_field_of_education(80),
+        level_of_study(60),
+        foundation,
+        new_to_australia,
+        ends_this_year
+    ),
+    KEY idx_enrold_ym          (enrol_year, enrol_month),
+    KEY idx_enrold_nationality (nationality(60)),
+    KEY idx_enrold_state       (state_code),
+    KEY idx_enrold_broad_field (broad_field_of_education(60)),
+    KEY idx_enrold_level       (level_of_study(60)),
+    KEY idx_enrold_country_fk  (country_id)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci
+  ROW_FORMAT=COMPRESSED
+  COMMENT='YTD cumulative enrolments, detailed grain (field of education + level of study) — separate fact table from fact_student_enrolment, do not union or sum together';
+
+
 -- Home Affairs BP0015 — Student Visa Activity
 -- Consolidates lodged + granted + grant_rate into single measure column
 -- Grain: one row per applicant_type × sector × financial_year × measure

@@ -22,22 +22,33 @@ import pandas as pd
 
 # ── Stub mysql.connector before importing lib_etl_mysql ───────────────────────
 # This avoids a hard dependency on the connector for unit tests.
+#
+# tests/conftest.py installs this stub first (pytest always imports conftest.py
+# before collecting test modules), so ETL.lib_etl_mysql's `import
+# mysql.connector` -- cached process-wide on first import -- binds to the
+# SAME object every test file references. Reuse it here rather than creating
+# a second, disconnected local module object: patches applied to an object
+# that isn't the one actually wired into sys.modules silently have no effect.
+if "mysql.connector" in sys.modules:
+    connector_stub = sys.modules["mysql.connector"]
+    mysql_stub = sys.modules["mysql"]
+    _MySQLError = connector_stub.Error
+else:
+    mysql_stub = types.ModuleType("mysql")
+    connector_stub = types.ModuleType("mysql.connector")
 
-mysql_stub = types.ModuleType("mysql")
-connector_stub = types.ModuleType("mysql.connector")
+    class _MySQLError(Exception):
+        def __init__(self, msg="", errno=0):
+            super().__init__(msg)
+            self.errno = errno
 
-class _MySQLError(Exception):
-    def __init__(self, msg="", errno=0):
-        super().__init__(msg)
-        self.errno = errno
+    connector_stub.Error = _MySQLError
+    connector_stub.connect = MagicMock()
 
-connector_stub.Error = _MySQLError
-connector_stub.connect = MagicMock()
-
-mysql_stub.connector = connector_stub
-sys.modules.setdefault("mysql", mysql_stub)
-sys.modules.setdefault("mysql.connector", connector_stub)
-sys.modules.setdefault("mysql.connector.pooling", types.ModuleType("mysql.connector.pooling"))
+    mysql_stub.connector = connector_stub
+    sys.modules.setdefault("mysql", mysql_stub)
+    sys.modules.setdefault("mysql.connector", connector_stub)
+    sys.modules.setdefault("mysql.connector.pooling", types.ModuleType("mysql.connector.pooling"))
 
 # Add ETL to path so we can import lib_etl_mysql
 sys.path.insert(0, str(Path(__file__).parent.parent))
@@ -653,6 +664,42 @@ class TestLoadEducationEnrolments(unittest.TestCase):
         self.assertIn("Refusing a silent partial load", str(ctx.exception))
         conn.rollback.assert_called_once()
         conn.commit.assert_not_called()
+
+    # ── key_columns parameterization (fact_student_enrolment_detailed support) ──
+
+    def test_key_columns_parameter_overrides_default(self):
+        """Two rows sharing the Basic 8-column key but differing on a 9th
+        column must NOT be flagged as duplicates when a wider key_columns
+        list (including that 9th column) is passed -- proving the grain is
+        actually configurable per table, not hardcoded to Basic's key."""
+        conn, cursor = _mock_conn()
+        df = self._make_edu_df(2)
+        # Force both rows onto the identical 8-column Basic key...
+        df.loc[1, ["enrol_year", "enrol_month"]] = df.loc[0, ["enrol_year", "enrol_month"]].values
+        # ...but give them distinct values in a 9th, non-Basic column.
+        df["extra_dimension"] = ["Field A", "Field B"]
+
+        # Default key (8 cols, doesn't include extra_dimension) -> collision.
+        with self.assertRaises(ValueError):
+            lib.load_education_enrolments(df, conn, staging_dir=Path("/tmp"), dry_run=False)
+
+        # Wider key including extra_dimension -> no collision, passes validation.
+        wider_key = lib.EDU_ENROLMENT_KEY_COLUMNS + ["extra_dimension"]
+        n = lib.load_education_enrolments(
+            df, conn=None, dry_run=False, key_columns=wider_key,
+        )
+        self.assertEqual(n, 2)
+
+    def test_detailed_key_columns_constant_is_wider_than_basic(self):
+        """DETAILED_ENROLMENT_KEY_COLUMNS must not be equal to (or a subset
+        of) EDU_ENROLMENT_KEY_COLUMNS -- Detailed is a genuinely wider grain,
+        confirmed empirically against the full 1,480,597-row dataset (0
+        duplicate rows under the 14-column key; 94.7% duplicate under
+        Basic's 8-column key)."""
+        basic = set(lib.EDU_ENROLMENT_KEY_COLUMNS)
+        detailed = set(lib.DETAILED_ENROLMENT_KEY_COLUMNS)
+        self.assertTrue(basic.issubset(detailed))
+        self.assertGreater(len(detailed), len(basic))
 
 
 # ─────────────────────────────────────────────────────────────────────────────

@@ -243,6 +243,15 @@ All three share the same status: schema is complete and correct (grain, keys, co
 - **Business description:** Department of Education international student enrolment counts, **YTD cumulative** (not monthly incremental) by year/month/nationality/state/sector.
 - **Tableau suitability:** ✅ Direct use — but **critical caveat**: values are YTD-cumulative. For a point-in-time "how many students this year" figure, filter to the **latest `enrol_month` for each `enrol_year`** — do not `SUM(ytd_enrolments)` across months within the same year, or totals will be wildly overstated. By far the largest table (3.5M rows) — always filter by year/month range before rendering.
 
+### `fact_student_enrolment_detailed` — 1,480,597 rows
+| Column | Type |
+|---|---|
+| `id` PK, `enrol_year` SMALLINT, `enrol_month` TINYINT (1-12), `region` VARCHAR(100), `nationality` VARCHAR(200), `country_id` (logical FK, populated post-load), `state_code`, `provider_type`, `sector`, `broad_field_of_education`, `narrow_field_of_education`, `detailed_field_of_education`, `level_of_study`, `foundation` (`Yes`/`No`), `new_to_australia` (`Yes`/`No`), `ends_this_year` (`Yes`/`No`), `ytd_enrolments`, `ytd_commencements`, `as_at_1st_month`, `monthly_enrolments`, `monthly_commencements` |
+
+- **Grain:** one row per (`enrol_year`, `enrol_month`, `region`, `nationality`, `state_code`, `provider_type`, `sector`, `broad_field_of_education`, `narrow_field_of_education`, `detailed_field_of_education`, `level_of_study`, `foundation`, `new_to_australia`, `ends_this_year`) — a **strict superset** of `fact_student_enrolment`'s grain, subdivided further by field of education and level of study.
+- **Business description:** Department of Education international student enrolment counts at finer grain than `fact_student_enrolment`, **YTD cumulative** (same convention as Basic). Source workbook also has a `Total` column — empirically proven an exact duplicate of `ytd_enrolments` (100.00% match across all 1,480,597 rows), so it was deliberately not loaded.
+- **⚠️ Tableau suitability — separate fact table, not a drill-down view of Basic:** `fact_student_enrolment` and `fact_student_enrolment_detailed` represent the **same underlying enrolment population at two different grains**. Empirically verified: 94.7% of Detailed rows share their business key with another Detailed row once you drop to Basic's grain (i.e. Detailed = Basic further split by field of education / level of study). **Never build a Tableau data source that unions or blends these two tables' measures together** — summing `ytd_enrolments` across both would double/multi-count the same students. Use `fact_student_enrolment` for overall market-trend dashboards; use `fact_student_enrolment_detailed` specifically for field-of-education / level-of-study analysis. Shared dimensions (`nationality`, `state_code`, `sector`, `provider_type`, ...) may appear in both, but treat them as two independent data sources.
+
 ---
 
 ## 3. Bridge, Staging, Audit
@@ -287,11 +296,12 @@ state_code, latest_vacancies, vacancy_as_at, median_annual_salary_aud, employmen
 (`dim_occupation` excluded — empty; use the occupation code/name columns embedded directly in fact tables instead.)
 
 ### Use as Tableau **facts**
-`fact_student_enrolment`, `fact_exchange_rate`, `fact_labour_force`, `fact_cpi`,
+`fact_student_enrolment`, `fact_student_enrolment_detailed`, `fact_exchange_rate`, `fact_labour_force`, `fact_cpi`,
 `fact_overseas_migration`, `fact_population_by_cob`, `fact_job_vacancy`,
 `fact_occupation_shortage`, `fact_skilled_migration`, `fact_student_visa_activity`,
 `ref_skilled_migration_by_cob_occupation`, `ref_occupation_profile`, `bridge_course_location`.
 (`fact_temp_skilled_visa`, `fact_temp_graduate_visa`, `fact_permanent_migration` excluded — currently empty.)
+`fact_student_enrolment` and `fact_student_enrolment_detailed` are different grains of the same population — build them as two separate data sources, never one blended/unioned source (see the Detailed table's entry above).
 
 ### Primary Tableau **data sources** (views/entry points)
 1. **`vw_occupation_intelligence`** — primary entry point for any occupation-shortage/vacancy dashboard.
@@ -422,3 +432,4 @@ five focused dashboards, each backed by one of the data sources above:
 | `fact_occupation_shortage` | 916 | `dim_occupation` | 0 |
 | `fact_temp_skilled_visa` | 0 | `fact_temp_graduate_visa` | 0 |
 | `fact_permanent_migration` | 0 | `stg_skillselect_eoi` | 0 |
+| `fact_student_enrolment_detailed` | 1,480,597 | | |

@@ -437,6 +437,24 @@ EDU_ENROLMENT_KEY_COLUMNS = [
     "sector", "provider_type", "new_to_australia", "ends_this_year",
 ]
 
+# The business/uniqueness key for fact_student_enrolment_detailed.
+# fact_student_enrolment_detailed is NOT the same grain as
+# fact_student_enrolment -- Detailed subdivides every Basic-grain
+# combination further by field of education and level of study (empirically
+# proven: 1,401,989 of 1,480,597 Detailed rows collide on Basic's 8-column
+# key). This wider 14-column key was validated against the FULL 1,480,597-row
+# Detailed dataset: 0 duplicate rows, 1,480,597 distinct keys, and 0
+# null/blank values in every one of these columns -- so unlike
+# EDU_ENROLMENT_KEY_COLUMNS, no COALESCE-to-empty-string generated shadow
+# columns are needed here; declaring these NOT NULL in the schema is
+# sufficient and correct for the data as observed.
+DETAILED_ENROLMENT_KEY_COLUMNS = [
+    "enrol_year", "enrol_month", "region", "nationality", "state_code",
+    "provider_type", "sector", "broad_field_of_education",
+    "narrow_field_of_education", "detailed_field_of_education",
+    "level_of_study", "foundation", "new_to_australia", "ends_this_year",
+]
+
 
 def load_education_enrolments(
     df: pd.DataFrame,
@@ -445,6 +463,7 @@ def load_education_enrolments(
     dry_run: bool = False,
     chunk_rows: int = BULK_CHUNK_ROWS,
     table: str = "fact_student_enrolment",
+    key_columns: Optional[list] = None,
 ) -> int:
     """
     Atomically replace `table` with a freshly validated load of `df`, using
@@ -470,8 +489,8 @@ def load_education_enrolments(
     this connection -- see `_mysql_config()`):
 
       1. Validate the incoming DataFrame has no duplicate business-key rows
-         (EDU_ENROLMENT_KEY_COLUMNS) -- fail loudly instead of silently
-         dropping rows. This happens BEFORE any database statement at all.
+         (per `key_columns`, the grain of `table`) -- fail loudly instead of
+         silently dropping rows. This happens BEFORE any database statement.
       2. `DELETE FROM {table}` -- not yet committed. Other sessions under
          MySQL's default REPEATABLE READ isolation continue to see the
          pre-delete data until this transaction commits, so no reader ever
@@ -511,13 +530,22 @@ def load_education_enrolments(
         chunk_rows:  Rows per CSV chunk (default: 100,000)
         table:       Target table name (default: fact_student_enrolment;
                      overridable for isolated testing against a disposable
-                     table that is never the real production table)
+                     table that is never the real production table, or to
+                     target a different Education fact table entirely, e.g.
+                     fact_student_enrolment_detailed)
+        key_columns: Business/uniqueness key to validate (default:
+                     EDU_ENROLMENT_KEY_COLUMNS, matching fact_student_enrolment's
+                     uk_enrol). Pass a different list for a table with a
+                     different grain -- e.g. fact_student_enrolment_detailed's
+                     wider key (see DETAILED_ENROLMENT_KEY_COLUMNS). Never
+                     assume one table's key is valid for another.
 
     Returns:
         Total rows loaded
     """
     staging_dir = staging_dir or Path("/tmp")
     audit = AuditRun(conn, "education", table)
+    key_columns = key_columns if key_columns is not None else EDU_ENROLMENT_KEY_COLUMNS
 
     if df.empty:
         log.warning(f"  ↳ load_education_enrolments: empty DataFrame for `{table}`")
@@ -525,7 +553,7 @@ def load_education_enrolments(
         return 0
 
     # ── 1. Enforce the uniqueness key in Python, before any DB statement ──────
-    key_cols = [c for c in EDU_ENROLMENT_KEY_COLUMNS if c in df.columns]
+    key_cols = [c for c in key_columns if c in df.columns]
     key_frame = df[key_cols].fillna("")
     dup_mask = key_frame.duplicated(keep=False)
     if dup_mask.any():

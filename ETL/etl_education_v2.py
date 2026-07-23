@@ -8,7 +8,12 @@ API:  Direct download from education.gov.au (stable URLs for Pivot files)
 
 Datasets:
   1. Pivot_Basic_All_web.xlsx      — YTD enrolments/commencements by nationality/sector/state
-  2. Pivot_Detailed_Latest_web.xlsx — More detailed breakdown (same dimensions + sub-sector)
+  2. Pivot_Detailed_Latest_web.xlsx — Finer grain than Basic: adds region, broad/
+     narrow/detailed field of education, level of study, and foundation status.
+     NOT the same grain as Basic (empirically verified: 94.7% of Detailed rows
+     collide on Basic's key) -- loads into a separate destination table,
+     fact_student_enrolment_detailed, and must never be unioned or summed
+     together with Basic in the same aggregation.
   3. International students 2005-2025.xlsx — Historical annual data
   4. SA4 enrolments by SA4/remoteness/field — spatial breakdown
 
@@ -92,18 +97,20 @@ SOURCES = [
 # It must be run through the File_extractor 2 pipeline to produce a flat/tabular
 # file before parse_pivot_basic() can read it.
 #
-# The extractor's data directories (input/output) live under raw_data/,
-# which is gitignored, but the extractor SOURCE CODE is tracked at
-# ETL/tools/extract_fixed.py — it is not colocated with its data anymore.
-FILE_EXTRACTOR_DIR   = BASE_DIR / "raw_data" / "File_extractor 2"
+# The extractor's data directories (input/output) live under
+# raw_data/department_of_education/File_extractor 2/ (gitignored). The
+# extractor SOURCE CODE is tracked separately at ETL/tools/extract_fixed.py
+# — it is not colocated with its data.
+FILE_EXTRACTOR_DIR   = BASE_DIR / "raw_data" / "department_of_education" / "File_extractor 2"
 EXTRACTOR_SCRIPT      = BASE_DIR / "ETL" / "tools" / "extract_fixed.py"
 EXTRACTOR_INPUT_DIR   = FILE_EXTRACTOR_DIR / "input"
 EXTRACTOR_OUTPUT_DIR  = FILE_EXTRACTOR_DIR / "output"
 PIVOT_BASIC_INPUT     = EXTRACTOR_INPUT_DIR / "Pivot_Basic_All_web.xlsx"
-# This is the ONLY valid Education Basic output. Its sibling summary workbook
-# (Pivot_Basic_All_web_extracted.xlsx, no "_raw_split" suffix) does not
+# These are the ONLY valid Education Basic/Detailed outputs. Their sibling
+# summary workbooks (Pivot_*_extracted.xlsx, no "_raw_split" suffix) do not
 # contain every raw row and must never be selected here.
-PIVOT_BASIC_RAW_SPLIT = EXTRACTOR_OUTPUT_DIR / "Pivot_Basic_All_web_extracted_raw_split.xlsx"
+PIVOT_BASIC_RAW_SPLIT    = EXTRACTOR_OUTPUT_DIR / "Pivot_Basic_All_web_extracted_raw_split.xlsx"
+PIVOT_DETAILED_RAW_SPLIT = EXTRACTOR_OUTPUT_DIR / "Pivot_Detailed_Latest_web_extracted_raw_split.xlsx"
 
 
 def _find_extracted_pivot_basic() -> Path | None:
@@ -182,7 +189,7 @@ def download_and_extract_pivot_basic(force: bool = False) -> Path:
 
 LOCAL_FILES = {
     "parse_pivot_basic":    _find_extracted_pivot_basic(),   # pre-extracted flat file
-    "parse_pivot_detailed": RAW_DIR / "Pivot_Detailed_Latest_web.xlsx",
+    "parse_pivot_detailed": PIVOT_DETAILED_RAW_SPLIT,        # pre-extracted flat file
 }
 
 
@@ -202,7 +209,7 @@ def parse_pivot_basic(path: Path) -> pd.DataFrame:
     The downloaded Pivot_Basic_All_web.xlsx from education.gov.au is a true
     Excel pivot table with merged cells — it is NOT tabular.  The expected
     input is the File_extractor 2 raw-split output:
-        raw_data/File_extractor 2/output/Pivot_Basic_All_web_extracted_raw_split.xlsx
+        raw_data/department_of_education/File_extractor 2/output/Pivot_Basic_All_web_extracted_raw_split.xlsx
     which is already flat / tabular and may span multiple sheets.
 
     Expected columns (post-normalise):
@@ -274,8 +281,104 @@ def parse_pivot_basic(path: Path) -> pd.DataFrame:
 
 
 def parse_pivot_detailed(path: Path) -> pd.DataFrame:
-    """Same as basic but may have more columns — reuse same parser."""
-    return parse_pivot_basic(path)
+    """
+    Parse the pre-extracted flat version of Pivot_Detailed_Latest_web.xlsx.
+
+    Detailed is NOT the same grain as Basic -- it subdivides every Basic-grain
+    (year, month, nationality, state, sector, provider_type, new_to_australia,
+    ends_this_year) combination further by region, field of education (broad/
+    narrow/detailed), level of study, and foundation status. Empirically
+    verified against the full 1,480,597-row dataset: 1,401,989 of those rows
+    (94.7%) share their Basic-grain key with at least one other Detailed row
+    -- so this MUST have its own parsing/keep-list and MUST NOT be routed
+    through parse_pivot_basic()'s truncated column set or into the same
+    destination table as Basic (see fact_student_enrolment_detailed).
+
+    The source 'Total' column is NOT included in the output: verified
+    against the full dataset, `total == data_ytd_enrolments` for 100.00% of
+    rows (1,480,597/1,480,597) -- it is an exact duplicate, not an
+    independent measure, so keeping it would just be redundant.
+
+    Expected columns (post-normalise):
+        year, month, region, nationality, state, provider_type, sector,
+        broad_field_of_education, narrow_field_of_education,
+        detailed_field_of_education, level_of_study, foundation,
+        new_to_australia, ends_this_year, data_ytd_enrolments,
+        data_ytd_commencements, data_as_at_1st_month,
+        data_enrolments_for_month, data_commencements_for_month
+    """
+    xl = pd.ExcelFile(path)
+    log.info(f"  Sheets ({len(xl.sheet_names)}): {xl.sheet_names[:8]}")
+
+    # Column name standardisation map. norm_col("ProviderType") -> "providertype"
+    # (no separator character to split the words on) -- must be renamed
+    # explicitly, exactly like parse_pivot_basic() does, or provider_type
+    # silently disappears from the natural key.
+    rename = {
+        "ytd_enrolments":         "data_ytd_enrolments",
+        "enrolments":             "data_ytd_enrolments",
+        "ytd_commencements":      "data_ytd_commencements",
+        "commencements":          "data_ytd_commencements",
+        "providertype":           "provider_type",
+        "as_at_1st_month":        "data_as_at_1st_month",
+        "enrolments_for_month":   "data_enrolments_for_month",
+        "commencements_for_month": "data_commencements_for_month",
+    }
+
+    numeric_cols = [
+        "year", "month",
+        "data_ytd_enrolments", "data_ytd_commencements",
+        "data_as_at_1st_month", "data_enrolments_for_month", "data_commencements_for_month",
+    ]
+
+    frames = []
+    for sheet in xl.sheet_names:
+        # Skip obvious non-data sheets
+        if any(x in sheet.lower() for x in ["note", "content", "glossary", "source", "readme"]):
+            continue
+        try:
+            raw = pd.read_excel(path, sheet_name=sheet, header=None)
+            header_idx = _find_header(raw, ["Year", "Month", "Nationality", "Sector", "State"])
+            df = raw.iloc[header_idx + 1:].copy()
+            df.columns = [norm_col(c) for c in raw.iloc[header_idx].tolist()]
+            df = df.dropna(how="all").reset_index(drop=True)
+
+            if "year" not in df.columns:
+                log.debug(f"  Sheet '{sheet}' — no 'year' column, skipping")
+                continue
+
+            df = df.rename(columns=rename)
+
+            if "month" in df.columns:
+                # Month is an abbreviated name ("Jul", "Jan"), not a number.
+                df["month"] = df["month"].map(_month_name_to_num)
+
+            for col in numeric_cols:
+                if col in df.columns:
+                    df[col] = pd.to_numeric(df[col], errors="coerce")
+
+            df = df.dropna(subset=[c for c in ["year", "month"] if c in df.columns])
+            if df.empty:
+                continue
+
+            log.info(f"  Sheet '{sheet}': {len(df):,} rows")
+            frames.append(df)
+        except Exception as e:
+            log.warning(f"  Sheet '{sheet}': {e}")
+
+    if not frames:
+        return pd.DataFrame()
+
+    result = pd.concat(frames, ignore_index=True)
+    keep = [c for c in [
+        "year", "month", "region", "nationality", "state", "provider_type", "sector",
+        "broad_field_of_education", "narrow_field_of_education", "detailed_field_of_education",
+        "level_of_study", "foundation", "new_to_australia", "ends_this_year",
+        "data_ytd_enrolments", "data_ytd_commencements",
+        "data_as_at_1st_month", "data_enrolments_for_month", "data_commencements_for_month",
+        # 'total' deliberately excluded -- proven exact duplicate of data_ytd_enrolments.
+    ] if c in result.columns]
+    return result[keep]
 
 
 def parse_historical(path: Path) -> pd.DataFrame:
