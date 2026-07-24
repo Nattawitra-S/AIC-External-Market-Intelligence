@@ -654,47 +654,74 @@ def run_mysql_education(conn, dry_run: bool = False, force: bool = False,
     succeeded, Basic's committed data is not affected (separate
     transactions) -- the failure still propagates so the caller/audit log
     sees it, but nothing already-committed is lost or rolled back.
+
+    Normal production mode discovers the current publication-page release
+    (see ETL/education_discovery.py) and downloads + extracts Basic and
+    Detailed together, as a validated pair from the SAME reporting month --
+    never independently, which could otherwise silently mix two different
+    months' data. Any failure during discovery/download/validation/
+    extraction stops the whole run before either table is touched.
     """
-    from ETL.lib_etl import download_file, add_etl_meta
+    from ETL.lib_etl import add_etl_meta
     from ETL.lib_etl_mysql import load_education_enrolments, DETAILED_ENROLMENT_KEY_COLUMNS
     from ETL import etl_education_v2 as etl_edu
 
     staging_dir = staging_dir or Path("/tmp/aic_edu_staging")
-    RAW_DIR = BASE_DIR / "raw_data" / "department_of_education"
 
     total = 0
+    basic_path = None
+    detailed_path = None
 
-    # ── Basic → fact_student_enrolment ─────────────────────────────────────────
-    path = None
-    # Pivot_Basic_All_web.xlsx from education.gov.au is a true Excel pivot
-    # cache (merged cells) — it must go through the File_extractor 2 pipeline
-    # before parse_pivot_basic can read it. Failures here must stop the run
-    # rather than silently falling back to a stale extracted file.
     if local_only:
-        path = etl_edu._find_extracted_pivot_basic()
-        if path is None:
+        basic_path = etl_edu._find_extracted_pivot_basic()
+        if basic_path is None:
             raise RuntimeError(
                 "  [Edu] --local-only: no valid raw-split file at "
                 f"{etl_edu.PIVOT_BASIC_RAW_SPLIT}"
             )
+        detailed_path = etl_edu._find_extracted_pivot_detailed()
+        if detailed_path is None:
+            raise RuntimeError(
+                "  [Edu] --local-only: no valid raw-split file at "
+                f"{etl_edu.PIVOT_DETAILED_RAW_SPLIT}"
+            )
+        # Release-consistency check: the workbooks are YTD-cumulative and
+        # contain many historical years/months regardless of which release
+        # produced them, so their CONTENTS cannot reveal which publication
+        # month they came from. Verify the release manifest instead (no
+        # network access) -- raises before any parsing/MySQL access on a
+        # mismatch, and on missing-manifest-in-a-real-run.
+        etl_edu.verify_local_only_release_manifest(dry_run=dry_run)
     elif dry_run:
-        # True zero-write dry-run: no download, no extractor.
-        path = etl_edu._find_extracted_pivot_basic()
-        if path is None:
+        # True zero-write dry-run: no download, no extractor, no discovery.
+        basic_path = etl_edu._find_extracted_pivot_basic()
+        if basic_path is None:
             log.warning(
                 "  [Edu] --dry-run: no local raw-split file yet "
                 f"({etl_edu.PIVOT_BASIC_RAW_SPLIT.name}) — skipping Basic Pivot"
             )
+        detailed_path = etl_edu._find_extracted_pivot_detailed()
+        if detailed_path is None:
+            log.warning(
+                "  [Edu] --dry-run: no local raw-split file yet "
+                f"({etl_edu.PIVOT_DETAILED_RAW_SPLIT.name}) — skipping Detailed Pivot"
+            )
     else:
-        path = etl_edu.download_and_extract_pivot_basic(force=force)
+        # Normal production mode: discover the newest complete release,
+        # download + validate both workbooks atomically, extract both in
+        # one pass. Any failure here stops the whole education run before
+        # any MySQL write is attempted -- both existing fact tables are
+        # left completely untouched.
+        basic_path, detailed_path = etl_edu.download_and_extract_release_pair(force=force)
 
-    if path is not None and path.exists():
-        log.info(f"  [Edu] Parsing Basic Pivot: {path.name}")
-        df_basic = etl_edu.parse_pivot_basic(path)
+    # ── Basic → fact_student_enrolment ─────────────────────────────────────────
+    if basic_path is not None and basic_path.exists():
+        log.info(f"  [Edu] Parsing Basic Pivot: {basic_path.name}")
+        df_basic = etl_edu.parse_pivot_basic(basic_path)
         if df_basic.empty:
             log.warning("  [Edu] Basic Pivot: empty — skipping")
         else:
-            df_basic = add_etl_meta(df_basic, f"education/{path.name}")
+            df_basic = add_etl_meta(df_basic, f"education/{basic_path.name}")
             log.info(f"  [Edu] Basic Pivot: {len(df_basic):,} rows parsed")
 
             df_basic = _rename(df_basic, {
@@ -718,57 +745,42 @@ def run_mysql_education(conn, dry_run: bool = False, force: bool = False,
         log.warning("  [Edu] No file for Basic Pivot — skipping")
 
     # ── Detailed → fact_student_enrolment_detailed ─────────────────────────────
-    path = None
-    detailed_url = "https://www.education.gov.au/sites/default/files/documents/Pivot_Detailed_Latest_web.xlsx"
-    if not local_only and not dry_run:
-        try:
-            path = download_file(detailed_url, RAW_DIR, "Pivot_Detailed_Latest_web_latest.xlsx", force=force)
-        except Exception as e:
-            log.warning(f"  [Edu] Download failed for Detailed Pivot: {e}")
+    if detailed_path is not None and detailed_path.exists():
+        log.info(f"  [Edu] Parsing Detailed Pivot: {detailed_path.name}")
+        df_detailed = etl_edu.parse_pivot_detailed(detailed_path)
+        if df_detailed.empty:
+            log.warning("  [Edu] Detailed Pivot: empty — skipping")
+        else:
+            df_detailed = add_etl_meta(df_detailed, f"education/{detailed_path.name}")
+            log.info(f"  [Edu] Detailed Pivot: {len(df_detailed):,} rows parsed")
 
-    if path is None or not path.exists():
-        path = etl_edu.LOCAL_FILES.get("parse_pivot_detailed")
+            df_detailed = _rename(df_detailed, {
+                "year":                        "enrol_year",
+                "month":                       "enrol_month",
+                "state":                       "state_code",
+                "data_ytd_enrolments":         "ytd_enrolments",
+                "data_ytd_commencements":      "ytd_commencements",
+                "data_as_at_1st_month":        "as_at_1st_month",
+                "data_enrolments_for_month":   "monthly_enrolments",
+                "data_commencements_for_month": "monthly_commencements",
+            })
+            want_detailed = [
+                "enrol_year", "enrol_month", "region", "nationality", "state_code",
+                "provider_type", "sector",
+                "broad_field_of_education", "narrow_field_of_education",
+                "detailed_field_of_education", "level_of_study", "foundation",
+                "new_to_australia", "ends_this_year",
+                "ytd_enrolments", "ytd_commencements",
+                "as_at_1st_month", "monthly_enrolments", "monthly_commencements",
+                "_etl_source", "_etl_loaded_at",
+            ]
+            df_detailed = _keep(df_detailed, want_detailed)
 
-    if path is not None and path.exists():
-        try:
-            log.info(f"  [Edu] Parsing Detailed Pivot: {path.name}")
-            df_detailed = etl_edu.parse_pivot_detailed(path)
-            if df_detailed.empty:
-                log.warning("  [Edu] Detailed Pivot: empty — skipping")
-            else:
-                df_detailed = add_etl_meta(df_detailed, f"education/{path.name}")
-                log.info(f"  [Edu] Detailed Pivot: {len(df_detailed):,} rows parsed")
-
-                df_detailed = _rename(df_detailed, {
-                    "year":                        "enrol_year",
-                    "month":                       "enrol_month",
-                    "state":                       "state_code",
-                    "data_ytd_enrolments":         "ytd_enrolments",
-                    "data_ytd_commencements":      "ytd_commencements",
-                    "data_as_at_1st_month":        "as_at_1st_month",
-                    "data_enrolments_for_month":   "monthly_enrolments",
-                    "data_commencements_for_month": "monthly_commencements",
-                })
-                want_detailed = [
-                    "enrol_year", "enrol_month", "region", "nationality", "state_code",
-                    "provider_type", "sector",
-                    "broad_field_of_education", "narrow_field_of_education",
-                    "detailed_field_of_education", "level_of_study", "foundation",
-                    "new_to_australia", "ends_this_year",
-                    "ytd_enrolments", "ytd_commencements",
-                    "as_at_1st_month", "monthly_enrolments", "monthly_commencements",
-                    "_etl_source", "_etl_loaded_at",
-                ]
-                df_detailed = _keep(df_detailed, want_detailed)
-
-                total += load_education_enrolments(
-                    df_detailed, conn, staging_dir=staging_dir, dry_run=dry_run,
-                    table="fact_student_enrolment_detailed",
-                    key_columns=DETAILED_ENROLMENT_KEY_COLUMNS,
-                )
-        except Exception as e:
-            log.error(f"  [Edu] Detailed Pivot failed: {e}")
-            raise
+            total += load_education_enrolments(
+                df_detailed, conn, staging_dir=staging_dir, dry_run=dry_run,
+                table="fact_student_enrolment_detailed",
+                key_columns=DETAILED_ENROLMENT_KEY_COLUMNS,
+            )
     else:
         log.warning("  [Edu] No file for Detailed Pivot — skipping")
 

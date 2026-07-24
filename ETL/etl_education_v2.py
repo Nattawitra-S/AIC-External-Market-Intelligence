@@ -3,7 +3,11 @@ etl_education_v2.py
 ====================
 ETL: Department of Education — International Student Data
 
-API:  Direct download from education.gov.au (stable URLs for Pivot files)
+API:  Basic/Detailed download URLs are auto-discovered from the public
+      publication page each run (see ETL/education_discovery.py) -- the
+      URLs embed a resource ID that changes with every monthly release,
+      so they are never hardcoded. SOURCES[...]["url"] below is a stale
+      literal, kept only as a fallback for the legacy SQLite run().
       Fallback: local XLSX files in raw_data/department_of_education/
 
 Datasets:
@@ -32,6 +36,7 @@ import argparse
 import re
 import subprocess
 import sys
+import zipfile
 from pathlib import Path
 
 import pandas as pd
@@ -106,6 +111,7 @@ EXTRACTOR_SCRIPT      = BASE_DIR / "ETL" / "tools" / "extract_fixed.py"
 EXTRACTOR_INPUT_DIR   = FILE_EXTRACTOR_DIR / "input"
 EXTRACTOR_OUTPUT_DIR  = FILE_EXTRACTOR_DIR / "output"
 PIVOT_BASIC_INPUT     = EXTRACTOR_INPUT_DIR / "Pivot_Basic_All_web.xlsx"
+PIVOT_DETAILED_INPUT  = EXTRACTOR_INPUT_DIR / "Pivot_Detailed_Latest_web.xlsx"
 # These are the ONLY valid Education Basic/Detailed outputs. Their sibling
 # summary workbooks (Pivot_*_extracted.xlsx, no "_raw_split" suffix) do not
 # contain every raw row and must never be selected here.
@@ -124,72 +130,356 @@ def _find_extracted_pivot_basic() -> Path | None:
     return None
 
 
-def _run_extractor() -> Path:
+def _find_extracted_pivot_detailed() -> Path | None:
+    """Detailed counterpart of _find_extracted_pivot_basic() -- same
+    deterministic, no-glob guarantee."""
+    if PIVOT_DETAILED_RAW_SPLIT.exists() and PIVOT_DETAILED_RAW_SPLIT.stat().st_size > 0:
+        return PIVOT_DETAILED_RAW_SPLIT
+    return None
+
+
+def _validate_pivot_cache_xlsx(path: Path) -> None:
     """
-    Invoke extract_fixed.py as a subprocess against the canonical input file
-    and verify it freshly produced the raw-split output. Raises on any
-    failure — callers must treat this as fatal, not fall back to a stale file.
+    Validate that `path` is a genuine XLSX pivot-cache workbook before it is
+    trusted enough to replace a canonical input file. Catches the failure
+    mode of a government error/redirect page being saved with an .xlsx
+    extension: an HTML error page is neither large enough, nor has a ZIP
+    signature, nor contains pivot cache parts, so it is rejected at every
+    one of these checks rather than silently accepted.
     """
-    before_mtime = PIVOT_BASIC_RAW_SPLIT.stat().st_mtime if PIVOT_BASIC_RAW_SPLIT.exists() else None
+    if not path.exists() or path.stat().st_size == 0:
+        raise ValueError(f"Downloaded file is missing or empty: {path}")
+    if path.stat().st_size < 10_000:
+        raise ValueError(
+            f"Downloaded file is implausibly small ({path.stat().st_size} bytes) for a "
+            f"pivot-cache workbook -- likely an error page, not real data: {path}"
+        )
+
+    with open(path, "rb") as f:
+        magic = f.read(4)
+    if magic[:2] != b"PK":
+        raise ValueError(
+            f"Downloaded file does not have a valid ZIP/XLSX signature "
+            f"(got {magic!r}) -- likely an HTML error page saved as .xlsx: {path}"
+        )
+
+    try:
+        with zipfile.ZipFile(path) as z:
+            names = z.namelist()
+    except zipfile.BadZipFile as e:
+        raise ValueError(f"Downloaded file is not a valid ZIP/XLSX archive: {path}") from e
+
+    has_defn = any("pivotCacheDefinition" in n and not n.endswith(".rels") for n in names)
+    has_records = any("pivotCacheRecords" in n and not n.endswith(".rels") for n in names)
+    if not (has_defn and has_records):
+        raise ValueError(
+            f"Downloaded file does not contain pivot cache definition/records "
+            f"-- not a valid pivot workbook: {path}"
+        )
+
+
+def _atomic_replace_release_files(triples: list[tuple[Path, Path]]) -> None:
+    """
+    Replace multiple "live" files with their validated "new" counterparts
+    as one rollback-protected operation (here: Basic input, Detailed
+    input, and the release manifest). Existing live files are first moved
+    aside to `<name>.bak` (not deleted or overwritten yet), then every new
+    file is moved into place. If ANY of those final moves fails, every
+    live path with a `.bak` is restored from it. Live paths that had no
+    prior file (first-ever run, nothing to back up) but were already
+    installed by this call are removed instead, since there is nothing
+    to restore them to. Either way, the pipeline never ends up with a
+    new Basic paired with an old Detailed, or a manifest that doesn't
+    match what's actually on disk.
+    On success, the `.bak` files are removed.
+    """
+    backups: list[tuple[Path, Path]] = []  # (live_path, backup_path)
+    installed: list[Path] = []  # live paths this call has moved a new file into
+    try:
+        for _, live in triples:
+            if live.exists():
+                backup = live.with_name(live.name + ".bak")
+                live.replace(backup)
+                backups.append((live, backup))
+
+        for new, live in triples:
+            new.replace(live)
+            installed.append(live)
+
+    except Exception:
+        backed_up_live_paths = {live for live, _ in backups}
+        for live, backup in backups:
+            if backup.exists():
+                backup.replace(live)
+        # Any live path this call installed that had no prior backup was
+        # created fresh by this call (e.g. first-ever run) -- there is
+        # nothing to restore it to, so it must be removed rather than
+        # left behind as an orphaned partial install.
+        for live in installed:
+            if live not in backed_up_live_paths:
+                live.unlink(missing_ok=True)
+        raise
+    else:
+        for _, backup in backups:
+            backup.unlink(missing_ok=True)
+
+
+def download_and_validate_release_pair(release) -> tuple[Path, Path]:
+    """
+    Download both Basic and Detailed workbooks to temporary .part files,
+    validate each as a genuine pivot-cache XLSX, build a release manifest
+    recording their publication metadata (release label/year/month,
+    source URLs, sizes, SHA-256 hashes), and only if everything passes
+    replace the canonical input files AND the manifest -- atomically, as
+    one 3-file rollback-protected unit (see _atomic_replace_release_files).
+
+    If any download, validation, or replacement step fails, NONE of the
+    three live files are left in a mismatched state: this never leaves
+    Basic updated while Detailed is stale (or vice versa), and never
+    leaves a manifest that doesn't match what's actually on disk. Leftover
+    .part files are always cleaned up on failure.
+
+    The manifest exists because the workbooks themselves are YTD-cumulative
+    and contain many historical years/months in every release -- their
+    CONTENTS cannot reveal which monthly publication produced them, so
+    that has to be recorded at download time (see
+    ETL/education_release_manifest.py).
+    """
+    from ETL.education_discovery import PUBLICATION_PAGE_URL
+    from ETL.education_release_manifest import MANIFEST_FILENAME, build_manifest, month_label, write_manifest
+
+    basic_part_name = PIVOT_BASIC_INPUT.name + ".part"
+    detailed_part_name = PIVOT_DETAILED_INPUT.name + ".part"
+    manifest_live = EXTRACTOR_INPUT_DIR / MANIFEST_FILENAME
+    manifest_part = EXTRACTOR_INPUT_DIR / (MANIFEST_FILENAME + ".part")
+
+    basic_part = EXTRACTOR_INPUT_DIR / basic_part_name
+    detailed_part = EXTRACTOR_INPUT_DIR / detailed_part_name
+
+    try:
+        basic_part = download_file(release.basic_url, EXTRACTOR_INPUT_DIR, basic_part_name, force=True)
+        _validate_pivot_cache_xlsx(basic_part)
+
+        detailed_part = download_file(release.detailed_url, EXTRACTOR_INPUT_DIR, detailed_part_name, force=True)
+        _validate_pivot_cache_xlsx(detailed_part)
+
+        # Manifest is only built/written after BOTH workbooks passed validation.
+        manifest = build_manifest(
+            release_year=release.year,
+            release_month=release.month,
+            publication_page_url=PUBLICATION_PAGE_URL,
+            basic_filename=PIVOT_BASIC_INPUT.name,
+            basic_url=release.basic_url,
+            basic_path=basic_part,
+            detailed_filename=PIVOT_DETAILED_INPUT.name,
+            detailed_url=release.detailed_url,
+            detailed_path=detailed_part,
+        )
+        write_manifest(manifest, manifest_part)
+
+        # All three validated -- replace live Basic, Detailed, and manifest
+        # together as one rollback-protected unit.
+        _atomic_replace_release_files([
+            (basic_part, PIVOT_BASIC_INPUT),
+            (detailed_part, PIVOT_DETAILED_INPUT),
+            (manifest_part, manifest_live),
+        ])
+    except Exception:
+        basic_part.unlink(missing_ok=True)
+        detailed_part.unlink(missing_ok=True)
+        manifest_part.unlink(missing_ok=True)
+        raise
+
+    log.info(
+        f"  [Edu] Downloaded, validated, and recorded release manifest "
+        f"({month_label(release.year, release.month)}) → "
+        f"{PIVOT_BASIC_INPUT.name}, {PIVOT_DETAILED_INPUT.name}"
+    )
+    return PIVOT_BASIC_INPUT, PIVOT_DETAILED_INPUT
+
+
+def verify_local_only_release_manifest(dry_run: bool) -> None:
+    """
+    Verify the release manifest for a --local-only run, without any
+    network access. Raises RuntimeError on any mismatch (wrong filename,
+    Basic/Detailed release inconsistency, missing file, size/hash
+    mismatch) -- always fatal, in both --dry-run and real runs, since a
+    mismatch here means the local files are provably NOT what they claim
+    to be.
+
+    If no manifest exists at all (the local files predate this feature),
+    that is treated differently depending on mode:
+      - --dry-run: allowed, with a prominent warning that these are
+        UNVERIFIED LEGACY FILES whose release month cannot be confirmed --
+        sufficient for path/routing checks only.
+      - a real, MySQL-writing run: fatal. There is deliberately no
+        override implemented yet; re-run the normal automated download
+        (without --local-only) to produce a verified manifest.
+    """
+    from ETL.education_release_manifest import (
+        MANIFEST_FILENAME, ManifestValidationError, read_manifest,
+        validate_local_files_against_manifest,
+    )
+
+    manifest_path = EXTRACTOR_INPUT_DIR / MANIFEST_FILENAME
+    manifest = read_manifest(manifest_path)
+
+    if manifest is None:
+        msg = (
+            f"  [Edu] ⚠ UNVERIFIED LEGACY LOCAL FILES: no release manifest found at "
+            f"{manifest_path} -- {PIVOT_BASIC_INPUT.name} / {PIVOT_DETAILED_INPUT.name} "
+            "predate the release-manifest feature and their release month cannot be "
+            "confirmed to match."
+        )
+        if dry_run:
+            log.warning(msg + " Proceeding for --dry-run path/routing checks only.")
+            return
+        raise RuntimeError(
+            msg + " Refusing to proceed with a real MySQL-writing --local-only run -- "
+            "no override is currently implemented. Re-run the normal automated download "
+            "(without --local-only) to create a verified manifest."
+        )
+
+    try:
+        validate_local_files_against_manifest(manifest, PIVOT_BASIC_INPUT, PIVOT_DETAILED_INPUT)
+    except ManifestValidationError as e:
+        raise RuntimeError(f"  [Edu] --local-only release manifest validation failed: {e}") from e
+
+    # The manifest existing and the INPUT files matching it only proves the
+    # inputs were downloaded correctly -- it says nothing about whether
+    # extraction ever completed for THIS input version. If extraction
+    # failed or was never run, the manifest stays at status="downloaded"
+    # and the current raw-split outputs could be stale leftovers from a
+    # DIFFERENT (older) release. Both --dry-run and a real run would go on
+    # to parse those raw-split files, so this must be fatal in both modes.
+    from ETL.education_release_manifest import STATUS_EXTRACTED, validate_raw_split_outputs_against_manifest
+
+    if manifest.status != STATUS_EXTRACTED:
+        raise RuntimeError(
+            f"  [Edu] --local-only: release manifest status is {manifest.status!r}, not "
+            f"{STATUS_EXTRACTED!r} -- extraction did not complete for this downloaded input "
+            "version, so the current raw-split output files cannot be trusted to correspond "
+            "to it. Refusing to parse potentially stale raw-split outputs. Re-run the normal "
+            "automated download+extract (without --local-only)."
+        )
+
+    try:
+        validate_raw_split_outputs_against_manifest(manifest, PIVOT_BASIC_RAW_SPLIT, PIVOT_DETAILED_RAW_SPLIT)
+    except ManifestValidationError as e:
+        raise RuntimeError(f"  [Edu] --local-only raw-split output validation failed: {e}") from e
+
+    log.info(
+        f"  [Edu] --local-only: release manifest verified, including raw-split outputs "
+        f"({manifest.release_label})"
+    )
+
+
+def _mark_manifest_extracted(basic_raw_split: Path, detailed_raw_split: Path) -> None:
+    """
+    Update the release manifest to status="extracted", recording each
+    raw-split output's size/hash. This is the ONLY thing that proves
+    extraction actually completed for the CURRENTLY downloaded inputs --
+    if this is never called (extraction failed, or the process crashed
+    before reaching here), the manifest stays at status="downloaded", and
+    verify_local_only_release_manifest() will correctly refuse to trust
+    whatever raw-split outputs happen to be sitting on disk.
+
+    This is a single-file update performed via write-to-.part-then-replace
+    (atomic), separate from the 3-file input+manifest swap in
+    download_and_validate_release_pair() -- by the time this runs, the
+    inputs are already safely committed, so only the manifest itself needs
+    updating.
+    """
+    from ETL.education_release_manifest import MANIFEST_FILENAME, mark_extracted, read_manifest, write_manifest
+
+    manifest_path = EXTRACTOR_INPUT_DIR / MANIFEST_FILENAME
+    manifest = read_manifest(manifest_path)
+    if manifest is None:
+        raise RuntimeError(
+            f"Cannot mark extraction complete: no release manifest found at {manifest_path} "
+            "-- this should not happen immediately after a successful download_and_validate_release_pair()."
+        )
+
+    updated = mark_extracted(manifest, basic_raw_split, detailed_raw_split)
+
+    tmp_path = manifest_path.with_suffix(manifest_path.suffix + ".part")
+    write_manifest(updated, tmp_path)
+    tmp_path.replace(manifest_path)
+    log.info(f"  [Edu] Release manifest marked extracted ({updated.release_label})")
+
+
+def _run_extractor_pair() -> tuple[Path, Path]:
+    """
+    Invoke the tracked extractor once, in auto-discovery mode (no filename
+    argument -- it processes whichever of the canonical Basic/Detailed
+    input files are present), and verify BOTH raw-split outputs were
+    freshly produced. Raises on any failure — callers must treat this as
+    fatal, never falling back to a stale raw-split file.
+    """
+    basic_before = PIVOT_BASIC_RAW_SPLIT.stat().st_mtime if PIVOT_BASIC_RAW_SPLIT.exists() else None
+    detailed_before = PIVOT_DETAILED_RAW_SPLIT.stat().st_mtime if PIVOT_DETAILED_RAW_SPLIT.exists() else None
 
     # No cwd needed: ETL/tools/extract_fixed.py resolves its own input/output
     # directories from its tracked location, not from the working directory.
-    subprocess.run(
-        [sys.executable, str(EXTRACTOR_SCRIPT), PIVOT_BASIC_INPUT.name],
-        check=True,
+    subprocess.run([sys.executable, str(EXTRACTOR_SCRIPT)], check=True)
+
+    for label, path, before in (
+        ("Basic", PIVOT_BASIC_RAW_SPLIT, basic_before),
+        ("Detailed", PIVOT_DETAILED_RAW_SPLIT, detailed_before),
+    ):
+        if not path.exists() or path.stat().st_size == 0:
+            raise RuntimeError(f"Extractor did not produce a valid {label} raw-split output: {path}")
+        after = path.stat().st_mtime
+        if before is not None and after <= before:
+            raise RuntimeError(
+                f"Extractor ran but {label} raw-split output was not updated (stale file): {path}"
+            )
+
+    return PIVOT_BASIC_RAW_SPLIT, PIVOT_DETAILED_RAW_SPLIT
+
+
+def download_and_extract_release_pair(force: bool = False) -> tuple[Path, Path]:
+    """
+    Full automated pipeline for a normal production Education run:
+
+        discover newest complete release (Basic + Detailed, same month)
+        -> download + validate both workbooks atomically, write manifest
+           with status="downloaded"
+        -> run the tracked extractor once (auto mode, both files present)
+        -> verify both raw-split outputs are fresh and non-empty
+        -> mark the manifest status="extracted" with raw-split hashes
+
+    Raises on any failure. No MySQL connection is involved at this stage —
+    this only prepares local files; the caller is responsible for stopping
+    the pipeline (and never attempting a load) if this raises. If
+    extraction fails, the manifest is left at status="downloaded" --
+    exactly what lets a later --local-only run detect that the current
+    raw-split outputs were never verified against this input version (see
+    verify_local_only_release_manifest / education_release_manifest.py).
+
+    `force` is accepted for call-site compatibility but does not gate
+    *whether* discovery/download happens — a normal run always re-checks
+    for the newest release, so the caller never has to remember --force.
+    """
+    from ETL.education_discovery import discover_current_education_urls
+
+    release = discover_current_education_urls()
+    log.info(
+        f"  [Edu] Discovered release {release.year}-{release.month:02d}: "
+        f"Basic={release.basic_url}  Detailed={release.detailed_url}"
     )
 
-    if not PIVOT_BASIC_RAW_SPLIT.exists() or PIVOT_BASIC_RAW_SPLIT.stat().st_size == 0:
-        raise RuntimeError(
-            f"Extractor did not produce a valid raw-split output: {PIVOT_BASIC_RAW_SPLIT}"
-        )
-    after_mtime = PIVOT_BASIC_RAW_SPLIT.stat().st_mtime
-    if before_mtime is not None and after_mtime <= before_mtime:
-        raise RuntimeError(
-            f"Extractor ran but raw-split output was not updated (stale file): {PIVOT_BASIC_RAW_SPLIT}"
-        )
-    return PIVOT_BASIC_RAW_SPLIT
+    download_and_validate_release_pair(release)
 
+    basic_raw_split, detailed_raw_split = _run_extractor_pair()
+    _mark_manifest_extracted(basic_raw_split, detailed_raw_split)
 
-def download_and_extract_pivot_basic(force: bool = False) -> Path:
-    """
-    Always attempt to download the latest Pivot_Basic_All_web workbook —
-    normal production Education mode must never silently reuse whatever
-    canonical input happens to already be on disk. Downloads into a
-    temporary .part file first, validates it, and atomically replaces the
-    canonical input only after the download succeeds.
-
-    On download failure: the .part file is removed, the existing canonical
-    input (if any) is left untouched, and the exception propagates so the
-    caller stops the pipeline rather than extracting a stale canonical
-    input or falling back to a stale raw-split output.
-
-    `force` is accepted for call-site compatibility (it forces the
-    temporary .part download to overwrite any leftover .part from a prior
-    failed attempt) but no longer gates *whether* a download happens —
-    that always happens now, so the caller never has to remember --force
-    for a normal run.
-    """
-    url = SOURCES[0]["url"]
-    part_name = PIVOT_BASIC_INPUT.name + ".part"
-    part_path = EXTRACTOR_INPUT_DIR / part_name
-
-    try:
-        part_path = download_file(url, EXTRACTOR_INPUT_DIR, part_name, force=True)
-        if not part_path.exists() or part_path.stat().st_size == 0:
-            raise RuntimeError(f"Downloaded file is missing or empty: {url}")
-        part_path.replace(PIVOT_BASIC_INPUT)  # atomic rename, same filesystem
-    except Exception:
-        part_path.unlink(missing_ok=True)
-        raise
-    log.info(f"  [Edu] Downloaded → {PIVOT_BASIC_INPUT}")
-
-    return _run_extractor()
+    return basic_raw_split, detailed_raw_split
 
 
 LOCAL_FILES = {
     "parse_pivot_basic":    _find_extracted_pivot_basic(),   # pre-extracted flat file
-    "parse_pivot_detailed": PIVOT_DETAILED_RAW_SPLIT,        # pre-extracted flat file
+    "parse_pivot_detailed": _find_extracted_pivot_detailed(),
 }
 
 

@@ -215,10 +215,9 @@ class TestRunMysqlEducationRouting(unittest.TestCase):
             calls.append({"table": table, "key_columns": key_columns, "n_rows": len(df)})
             return len(df)
 
-        with patch.object(etl_edu, "download_and_extract_pivot_basic", return_value=self.basic_path), \
+        with patch.object(etl_edu, "download_and_extract_release_pair",
+                          return_value=(self.basic_path, self.detailed_path)), \
              patch.object(etl_edu, "parse_pivot_basic", return_value=basic_df), \
-             patch("ETL.lib_etl.download_file", side_effect=Exception("no network in test")), \
-             patch.object(etl_edu, "LOCAL_FILES", {"parse_pivot_detailed": self.detailed_path}), \
              patch.object(etl_edu, "parse_pivot_detailed", return_value=detailed_df), \
              patch("ETL.lib_etl_mysql.load_education_enrolments", side_effect=fake_load):
             total = rms.run_mysql_education(conn, dry_run=False, local_only=False)
@@ -267,16 +266,34 @@ class TestRunMysqlEducationRouting(unittest.TestCase):
                 return len(df)
             raise RuntimeError("simulated Detailed load failure")
 
-        with patch.object(etl_edu, "download_and_extract_pivot_basic", return_value=self.basic_path), \
+        with patch.object(etl_edu, "download_and_extract_release_pair",
+                          return_value=(self.basic_path, self.detailed_path)), \
              patch.object(etl_edu, "parse_pivot_basic", return_value=basic_df), \
-             patch("ETL.lib_etl.download_file", side_effect=Exception("no network in test")), \
-             patch.object(etl_edu, "LOCAL_FILES", {"parse_pivot_detailed": self.detailed_path}), \
              patch.object(etl_edu, "parse_pivot_detailed", return_value=detailed_df), \
              patch("ETL.lib_etl_mysql.load_education_enrolments", side_effect=fake_load):
             with self.assertRaises(RuntimeError):
                 rms.run_mysql_education(conn, dry_run=False, local_only=False)
 
         self.assertEqual(basic_call_happened, [True], "Basic's load must have already run/succeeded before Detailed failed")
+
+    def test_preload_failure_causes_zero_mysql_writes(self):
+        """If discovery/download/extraction fails (before either dataset is
+        even parsed), load_education_enrolments must never be called at
+        all -- zero MySQL writes, both existing fact tables untouched."""
+        conn = MagicMock()
+        load_calls = []
+
+        def fake_load(*args, **kwargs):
+            load_calls.append(True)
+            return 0
+
+        with patch.object(etl_edu, "download_and_extract_release_pair",
+                          side_effect=RuntimeError("simulated discovery/download failure")), \
+             patch("ETL.lib_etl_mysql.load_education_enrolments", side_effect=fake_load):
+            with self.assertRaises(RuntimeError):
+                rms.run_mysql_education(conn, dry_run=False, local_only=False)
+
+        self.assertEqual(load_calls, [], "load_education_enrolments must never be called on pre-load failure")
 
 
 if __name__ == "__main__":

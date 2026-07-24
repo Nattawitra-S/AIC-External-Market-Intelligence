@@ -11,9 +11,10 @@ Fixes in this version:
 - ใช้ csv.writer เพื่อกันปัญหา comma/quote ในข้อมูล
 
 This is the tracked (git-visible) copy of the extractor. Its data
-directories (input/output) live under raw_data/File_extractor 2/, which is
-gitignored — so the script location and the data location are deliberately
-different. Do not use Path(__file__).parent as the data root here.
+directories (input/output) live under
+raw_data/department_of_education/File_extractor 2/, which is gitignored —
+so the script location and the data location are deliberately different.
+Do not use Path(__file__).parent as the data root here.
 """
 
 import argparse
@@ -32,14 +33,23 @@ from openpyxl.utils import get_column_letter
 
 # ── Paths ──────────────────────────────────────────────────────────────────────
 # This script lives at ETL/tools/extract_fixed.py (tracked). Its data
-# directories live at raw_data/File_extractor 2/{input,output} (gitignored,
-# unchanged location). Resolve the project root from this file's own
-# location rather than assuming the script and data share a directory.
+# directories live at
+# raw_data/department_of_education/File_extractor 2/{input,output}
+# (gitignored). Resolve the project root from this file's own location
+# rather than assuming the script and data share a directory.
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
-DATA_DIR     = PROJECT_ROOT / "raw_data" / "File_extractor 2"
+DATA_DIR     = PROJECT_ROOT / "raw_data" / "department_of_education" / "File_extractor 2"
 INPUT_DIR    = DATA_DIR / "input"
 OUTPUT_DIR   = DATA_DIR / "output"
 OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
+
+# Files processed automatically when no filename argument is supplied.
+# Deterministic, matching the canonical local input filenames used by the
+# rest of the Education pipeline (ETL/etl_education_v2.py) -- not a glob.
+AUTO_INPUT_FILES = [
+    "Pivot_Basic_All_web.xlsx",
+    "Pivot_Detailed_Latest_web.xlsx",
+]
 
 NS = "http://schemas.openxmlformats.org/spreadsheetml/2006/main"
 NS_MAP = {"x": NS}
@@ -475,29 +485,71 @@ def main():
         description="Extract a pivot-cache .xlsx workbook (from /input) into a flat/tabular output (in /output).",
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog=(
-            "Example:\n"
-            "  python3 ETL/tools/extract_fixed.py Pivot_Basic_All_web.xlsx\n\n"
+            "Examples:\n"
+            "  python3 ETL/tools/extract_fixed.py Pivot_Basic_All_web.xlsx\n"
+            "  python3 ETL/tools/extract_fixed.py\n\n"
+            "With no filename, processes whichever of these are present in input/:\n"
+            + "\n".join(f"  - {name}" for name in AUTO_INPUT_FILES) + "\n\n"
             f"Input folder:  {INPUT_DIR}\n"
             f"Output folder: {OUTPUT_DIR}"
         ),
     )
     ap.add_argument(
         "filename",
-        help="Name of the .xlsx file inside the input/ folder to process (not a full path).",
+        nargs="?",
+        help="Optional name of the .xlsx file inside the input/ folder to process (not a full "
+             "path). Omit to automatically process Pivot_Basic_All_web.xlsx and "
+             "Pivot_Detailed_Latest_web.xlsx, whichever are present.",
     )
     args = ap.parse_args()
 
-    try:
-        xlsx_path = resolve_input_path(args.filename)
-    except (ValueError, FileNotFoundError) as e:
-        print(f"❌ {e}")
-        sys.exit(1)
+    if args.filename:
+        # Explicit single-filename mode: byte-for-byte the original,
+        # unchanged CLI contract -- resolve exactly this one file, fail
+        # immediately (using the exception's own message) if it's missing
+        # or invalid. No auto-mode tolerance applies here.
+        try:
+            xlsx_path = resolve_input_path(args.filename)
+        except (ValueError, FileNotFoundError) as e:
+            print(f"❌ {e}")
+            sys.exit(1)
+        input_paths = [xlsx_path]
+    else:
+        # Auto mode: process whichever of the deterministic Basic/Detailed
+        # filenames are present, skip a missing one with a warning, and
+        # fail only if neither is present.
+        input_paths = []
+        missing_files = []
+        for filename in AUTO_INPUT_FILES:
+            try:
+                input_paths.append(resolve_input_path(filename))
+            except FileNotFoundError:
+                missing_files.append(filename)
+            except ValueError as e:
+                # Absolute path / traversal / non-.xlsx in a hardcoded
+                # deterministic filename would mean real misconfiguration,
+                # not "this month's file isn't published yet" -- fatal.
+                print(f"❌ {e}")
+                sys.exit(1)
 
-    try:
-        process_file(xlsx_path)
-    except Exception as e:
-        print(f"\n  ❌ Error processing {xlsx_path.name}: {e}")
-        sys.exit(1)
+        if missing_files:
+            print("⚠ Skipping file(s) not currently present in the input folder:")
+            for filename in missing_files:
+                print(f"   - {filename}")
+
+        if not input_paths:
+            print("\n❌ No supported input files were found.")
+            print("   Add at least one of these files to the input folder:")
+            for filename in AUTO_INPUT_FILES:
+                print(f"   - {filename}")
+            sys.exit(1)
+
+    for xlsx_path in input_paths:
+        try:
+            process_file(xlsx_path)
+        except Exception as e:
+            print(f"\n  ❌ Error processing {xlsx_path.name}: {e}")
+            sys.exit(1)
 
     print(f"\n{'=' * 60}")
     print("All done! Check the /output folder.")
